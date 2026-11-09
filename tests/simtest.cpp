@@ -1,6 +1,23 @@
 // Headless check that computer drivers can complete every track and that the game modes terminate.
 #include "race.h"
+#include <algorithm>
 #include <cstdio>
+
+static const float MAX_ALLOWED_OVERLAP = 1.5f;   // px; about what rounding to screen pixels hides
+
+// The deepest overlap between any two cars that are at the same height and still in play.
+static float worstOverlap(const Race& race) {
+    float worst = 0;
+    const auto& cars = race.cars();
+    for (size_t i = 0; i < cars.size(); ++i) {
+        for (size_t j = i + 1; j < cars.size(); ++j) {
+            if (cars[i].state != CarState::Drive || cars[j].state != CarState::Drive) continue;
+            if (std::abs(cars[i].z - cars[j].z) > 8.0f) continue;
+            worst = std::max(worst, carOverlapDepth(cars[i], cars[j]));
+        }
+    }
+    return worst;
+}
 
 static int runCircuit(const TrackDef& def, const Track& track, float skill) {
     RaceConfig cfg;
@@ -11,10 +28,21 @@ static int runCircuit(const TrackDef& def, const Track& track, float skill) {
     Input none[2];
     int ticks = 0;
     const int limit = 60 * 60 * 6;
-    while (race.phase() != Phase::Finished && ticks < limit) { race.step(none); ++ticks; }
+    float deepest = 0;
+    int bumps = 0, hits = 0;
+    while (race.phase() != Phase::Finished && ticks < limit) {
+        race.step(none);
+        ++ticks;
+        deepest = std::max(deepest, worstOverlap(race));
+        for (const RaceEvent& e : race.events()) {
+            bumps += e.type == EventType::Bump ? 1 : 0;
+            hits += e.type == EventType::Hit ? 1 : 0;
+        }
+    }
 
     int failures = 0;
-    printf("  skill %.2f:", skill);
+    printf("  skill %.2f (deepest overlap %.2f px, %d bumps, %d shell hits%s):", skill, deepest, bumps, hits, deepest > MAX_ALLOWED_OVERLAP ? "  WRONG" : "");
+    if (deepest > MAX_ALLOWED_OVERLAP) ++failures;
     for (const Car& c : race.cars()) {
         printf("  [%6.1fs best %5.1f F%d S%d R%d]", c.finished ? c.finishTime : -1.0f, c.bestLap, c.falls, c.strays, c.rescues);
         if (!c.finished) ++failures;
@@ -106,7 +134,8 @@ static int runSteeringFeel(int trackIndex) {
         in[0].right = false;
         float turned = race.cars()[0].heading - before;
         for (int i = 0; i < 6; ++i) race.step(in);
-        if (respawnCount(race) != respawns) { printf("  %d ticks: car left the track, ignored\n", ticks); continue; }
+        const Car& car = race.cars()[0];
+        if (respawnCount(race) != respawns || car.knock > 0 || car.yawKick != 0) { printf("  %d ticks: car hit something or left the track, ignored\n", ticks); continue; }
         ++valid;
         if (perTick == 0) perTick = turned / ticks;
         bool linear = std::abs(turned / ticks - perTick) < perTick * 0.01f;
@@ -164,6 +193,133 @@ static int runLayoutChecks(const Track& track) {
     return failures + (stuck ? 1 : 0);
 }
 
+static void stage(Car& c, const Track& track, int idx, float lateral, float heading, Vec2 vel) {
+    const Sample& s = track.samples()[track.wrap(idx)];
+    c.pos = s.pos + s.normal * lateral;
+    c.heading = heading;
+    c.vel = vel;
+    c.idx = c.safeIdx = track.wrap(idx);
+    c.z = c.vz = 0;
+    c.invuln = 0;
+}
+
+// Finds a stretch of route that is straight and clear, to crash cars on.
+static int findClearStraight(const Track& track) {
+    for (int i = 0; i < track.count(); ++i) {
+        bool ok = true;
+        for (int j = -30; j <= 30 && ok; j += 3) {
+            const Sample& s = track.samples()[track.wrap(i + j)];
+            ok = std::abs(s.curvature) < 0.0015f && !track.inJumpZone(track.wrap(i + j));
+            for (float l = -40; l <= 40 && ok; l += 5) ok = track.at(s.pos + s.normal * l) == Surface::Road;
+        }
+        if (ok) return i;
+    }
+    return -1;
+}
+
+static int runBounceChecks(const Track& track) {
+    const int idx = findClearStraight(track);
+    if (idx < 0) { printf("  no clear straight on this course, skipped\n"); return 0; }
+    const Sample& s = track.samples()[idx];
+    const float heading = std::atan2(s.tan.y, s.tan.x);
+    RaceConfig cfg;
+    cfg.numCars = 2;
+    cfg.humans = 2;
+    int failures = 0;
+
+    {   // Rear-ending a parked car: they must fly apart at least as fast as they met.
+        Race race(track, cfg);
+        Input in[2];
+        while (race.phase() == Phase::Countdown) race.step(in);
+        Car& target = race.carForTest(0);
+        Car& hitter = race.carForTest(1);
+        stage(target, track, idx, 0, heading, {});
+        stage(hitter, track, idx - 12, 0, heading, s.tan * 200.0f);
+        in[1].gas = true;
+        float closing = 0, parted = 0, deepest = 0;
+        for (int t = 0; t < 40; ++t) {
+            float before = dot(hitter.vel - target.vel, s.tan);
+            race.step(in);
+            deepest = std::max(deepest, worstOverlap(race));
+            if (len(target.vel) > 30.0f) { closing = before; parted = dot(target.vel - hitter.vel, s.tan); break; }
+        }
+        bool ok = closing > 100.0f && parted >= closing && deepest <= MAX_ALLOWED_OVERLAP;
+        printf("  rear-end: met at %.0f px/s, parted at %.0f px/s, overlap %.2f px%s\n", closing, parted, deepest, ok ? "" : "  WRONG");
+        if (!ok) ++failures;
+    }
+    {   // T-boning a parked car: the knock must carry it well sideways, not die in the tyres.
+        Race race(track, cfg);
+        Input in[2];
+        while (race.phase() == Phase::Countdown) race.step(in);
+        Car& target = race.carForTest(0);
+        Car& hitter = race.carForTest(1);
+        stage(target, track, idx, 0, heading, {});
+        const Vec2 toward = s.normal * -1.0f;
+        stage(hitter, track, idx, 34.0f, std::atan2(toward.y, toward.x), toward * 200.0f);
+        in[1].gas = true;
+        const Vec2 start = target.pos;
+        float deepest = 0;
+        int after = -1;
+        for (int t = 0; t < 60 && after < 20; ++t) {
+            race.step(in);
+            deepest = std::max(deepest, worstOverlap(race));
+            if (after >= 0) ++after;
+            else if (len(target.vel) > 30.0f) after = 0;
+        }
+        float carried = dot(target.pos - start, toward);
+        bool ok = carried >= 30.0f && deepest <= MAX_ALLOWED_OVERLAP;   // tyre grip alone would stop it within about 25 px
+        printf("  T-bone: target carried %.0f px sideways, overlap %.2f px%s\n", carried, deepest, ok ? "" : "  WRONG");
+        if (!ok) ++failures;
+    }
+    return failures;
+}
+
+// Drives a car straight at the side of a solid object and checks it rebounds without entering it.
+static int runWallBounce(const Track& track) {
+    const float hw = track.halfWidth();
+    for (int i = 40; i < track.count() - 40; ++i) {
+        if (track.inJumpZone(i)) continue;
+        const Sample& s = track.samples()[i];
+        float wall = -1;
+        for (float l = 0; l <= hw; l += 2) {
+            if (track.at(s.pos + s.normal * l) == Surface::Wall) { wall = l; break; }
+        }
+        if (wall < 0) continue;
+        bool open = true;
+        for (float l = wall - 44; l < wall - 1 && open; l += 2)
+            for (float t : {-12.0f, 0.0f, 12.0f}) open = open && track.at(s.pos + s.normal * l + s.tan * t) != Surface::Wall;
+        if (!open) continue;
+
+        RaceConfig cfg;
+        cfg.mode = RaceMode::TimeTrial;
+        cfg.numCars = 1;
+        cfg.humans = 1;
+        Race race(track, cfg);
+        Input in[2];
+        while (race.phase() == Phase::Countdown) race.step(in);
+        Car& car = race.carForTest(0);
+        stage(car, track, i, wall - 34.0f, std::atan2(s.normal.y, s.normal.x), s.normal * 220.0f);
+        float impact = 0, rebound = 0;
+        int inside = 0;
+        for (int t = 0; t < 40; ++t) {
+            float before = dot(car.vel, s.normal);
+            race.step(in);
+            const Vec2 ax = fromAngle(car.heading), ay{-ax.y, ax.x};
+            const float hx = car.spec->halfLength - 1.5f, hy = car.spec->halfWidth - 1.5f;
+            for (float a : {-1.0f, 1.0f})
+                for (float b : {-1.0f, 1.0f})
+                    if (track.at(car.pos + ax * (hx * a) + ay * (hy * b)) == Surface::Wall) ++inside;
+            // Objects are rarely square-on to the route, so measure the speed kept rather than one direction.
+            if (dot(car.vel, s.normal) < -20.0f) { impact = before; rebound = len(car.vel); break; }
+        }
+        bool ok = impact > 100.0f && rebound >= impact * 0.6f && inside == 0;
+        printf("  wall: hit at %.0f px/s, rebounded at %.0f px/s, corners inside %d%s\n", impact, rebound, inside, ok ? "" : "  WRONG");
+        return ok ? 0 : 1;
+    }
+    printf("  no object beside the route on this course, skipped\n");
+    return 0;
+}
+
 int main() {
     int failures = 0;
     printf("STEERING\n");
@@ -173,6 +329,8 @@ int main() {
         Track track(def);
         printf("%s (%dx%d, %.0f px/lap)\n", def.name, track.width(), track.height(), track.length());
         failures += runLayoutChecks(track);
+        failures += runBounceChecks(track);
+        failures += runWallBounce(track);
         failures += runCircuit(def, track, 1.0f);
         failures += runCircuit(def, track, 0.88f);
         failures += runHeadToHead(track);

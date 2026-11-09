@@ -2,14 +2,14 @@
 #include "track.h"
 
 const VehicleSpec& vehicleSpec(VehicleKind k) {
-    //                                   accel  top  brake  turn  grip  mass  rad  rough  gun
+    //          accel  top  brake  turn  grip   mass   rad  halfL  halfW  rough  gun
     static const VehicleSpec specs[] = {
-        {"COUPE",   360, 235, 520, 5.4f,  8.5f, 1.0f, 7.5f, 1.0f,  false},
-        {"BUGGY",   400, 225, 500, 5.6f,  6.5f, 1.1f, 8.0f, 0.45f, false},
-        {"FORMULA", 460, 290, 640, 5.2f, 11.0f, 0.85f, 8.0f, 1.3f, false},
-        {"SKIFF",   300, 240, 300, 4.4f,  2.6f, 1.0f, 8.0f, 1.0f,  false},
-        {"TANK",    290, 190, 500, 3.8f, 16.0f, 2.2f, 9.0f, 0.2f,  true},
-        {"SLED",    320, 230, 340, 5.0f,  3.6f, 0.9f, 7.5f, 1.0f,  false},
+        {"COUPE",   360, 235, 520, 5.4f,  8.5f, 1.0f,  7.5f, 10.5f, 7.0f, 1.0f,  false},
+        {"BUGGY",   400, 225, 500, 5.6f,  6.5f, 1.1f,  8.0f,  9.5f, 8.0f, 0.45f, false},
+        {"FORMULA", 460, 290, 640, 5.2f, 11.0f, 0.85f, 8.0f, 13.0f, 7.0f, 1.3f,  false},
+        {"SKIFF",   300, 240, 300, 4.4f,  2.6f, 1.0f,  8.0f, 12.5f, 6.0f, 1.0f,  false},
+        {"TANK",    290, 190, 500, 3.8f, 16.0f, 2.2f,  9.0f, 11.5f, 9.5f, 0.2f,  true},
+        {"SLED",    320, 230, 340, 5.0f,  3.6f, 0.9f,  7.5f, 12.0f, 7.0f, 1.0f,  false},
     };
     return specs[(int)k];
 }

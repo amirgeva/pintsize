@@ -13,8 +13,28 @@ constexpr float RAMP_LIFT = 0.5f;          // launch speed upward, as a fraction
 constexpr float FALL_TIME = 0.8f;
 constexpr float INVULN_TIME = 1.6f;
 constexpr float SPIN_TIME = 0.8f;
-constexpr float RESTITUTION_CAR = 0.9f;
-constexpr float RESTITUTION_WALL = 0.45f;
+
+// Collision response. Raise the restitution values and minimum bounces for a livelier game.
+constexpr float RESTITUTION_CAR = 1.1f;    // separation speed as a fraction of closing speed
+constexpr float MIN_CAR_BOUNCE = 120.0f;   // even a gentle nudge pushes cars this fast apart (px/s)
+constexpr float MIN_CLOSING = 30.0f;       // below this closing speed the bounce is only proportional
+constexpr float RESTITUTION_WALL = 0.8f;
+constexpr float WALL_HIT_SPEED = 40.0f;    // slower contact than this counts as a scrape
+constexpr float WALL_MIN_BOUNCE = 90.0f;
+constexpr float WALL_SCRAPE = 0.97f;       // speed kept along a wall on each contact
+constexpr float KNOCK_TIME = 0.35f;        // how long a hit breaks the tyres' grip (s)
+constexpr float KNOCK_GRIP = 0.12f;        // grip left at the moment of impact
+constexpr float KNOCK_THRUST = 0.35f;      // throttle left at the moment of impact
+constexpr float YAW_SCALE = 0.003f;        // how much an off-centre hit twists a car
+constexpr float YAW_MAX = 5.0f;            // rad/s
+constexpr float YAW_DECAY = 7.0f;          // 1/s
+constexpr float MAX_SPEED_AFTER_HIT = 1.4f;   // as a fraction of top speed
+constexpr int SOLVER_PASSES = 4;           // lets a push ripple through a pile of cars
+constexpr float SEPARATION_SKIN = 0.25f;   // leaves separated cars this far apart (px)
+constexpr float RESPAWN_CLEARANCE = 5.0f;  // margin around a respawning car (px)
+constexpr float WEDGED_TIME = 0.8f;        // a car stuck in an object this long is rescued (s)
+constexpr float MAX_AIR_GAP = 8.0f;        // cars further apart in height than this pass over each other
+
 constexpr int PROGRESS_WINDOW = 40;
 constexpr float STRAY_MARGIN = Track::APRON + 8.0f;
 constexpr float OFFSCREEN_MARGIN = 14.0f;
@@ -37,7 +57,76 @@ float quantize(float a) {
     float step = TAU / HEADING_STEPS;
     return std::round(a / step) * step;
 }
+
+float cross(Vec2 a, Vec2 b) { return a.x * b.y - a.y * b.x; }
+
+struct CarBox {
+    Vec2 c, ax, ay;
+    float hx, hy;
+};
+
+CarBox carBox(const Car& car, float inflate = 0) {
+    CarBox b;
+    b.c = car.pos;
+    b.ax = fromAngle(car.heading);
+    b.ay = {-b.ax.y, b.ax.x};
+    b.hx = car.spec->halfLength + inflate;
+    b.hy = car.spec->halfWidth + inflate;
+    return b;
+}
+
+float projectedRadius(const CarBox& b, Vec2 axis) {
+    return std::abs(dot(axis, b.ax)) * b.hx + std::abs(dot(axis, b.ay)) * b.hy;
+}
+
+// Separating-axis test. On overlap, n points from a to b and depth is how far to push them apart.
+bool boxesOverlap(const CarBox& a, const CarBox& b, Vec2& n, float& depth) {
+    const Vec2 axes[4] = {a.ax, a.ay, b.ax, b.ay};
+    const Vec2 d = b.c - a.c;
+    depth = 1e9f;
+    for (Vec2 axis : axes) {
+        float sep = dot(d, axis);
+        float overlap = projectedRadius(a, axis) + projectedRadius(b, axis) - std::abs(sep);
+        if (overlap <= 0) return false;
+        if (overlap < depth) { depth = overlap; n = sep < 0 ? axis * -1.0f : axis; }
+    }
+    return true;
+}
+
+// The point on a box furthest along dir. Soft near the face directions, so two cars meeting
+// square-on get a contact point on their centre lines rather than on an arbitrary corner.
+Vec2 supportPoint(const CarBox& b, Vec2 dir) {
+    return b.c + b.ax * (b.hx * clampf(dot(b.ax, dir) * 3.0f, -1, 1)) + b.ay * (b.hy * clampf(dot(b.ay, dir) * 3.0f, -1, 1));
+}
+
+// Calls visit with points around the outline of the car's box.
+template <class F>
+void forEachProbe(const Car& c, Vec2 pos, F&& visit) {
+    const Vec2 ax = fromAngle(c.heading), ay{-ax.y, ax.x};
+    const float hx = c.spec->halfLength, hy = c.spec->halfWidth;
+    for (float s : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+        visit(pos + ax * (hx * s) + ay * hy);
+        visit(pos + ax * (hx * s) - ay * hy);
+    }
+    visit(pos + ax * hx);
+    visit(pos - ax * hx);
+}
+
+void applyKnock(Car& c, float amount) { c.knock = std::max(c.knock, KNOCK_TIME * amount); }
+void addYaw(Car& c, float torque) { c.yawKick = clampf(c.yawKick + torque * YAW_SCALE, -YAW_MAX, YAW_MAX); }
+
+void limitSpeed(Car& c) {
+    const float limit = c.spec->topSpeed * MAX_SPEED_AFTER_HIT;
+    const float s = len(c.vel);
+    if (s > limit) c.vel = c.vel * (limit / s);
+}
 }  // namespace
+
+float carOverlapDepth(const Car& a, const Car& b) {
+    Vec2 n;
+    float depth;
+    return boxesOverlap(carBox(a), carBox(b), n, depth) ? depth : 0.0f;
+}
 
 Race::Race(const Track& track, const RaceConfig& cfg) : track_(track), cfg_(cfg), rng_(cfg.seed) {
     const VehicleSpec& spec = vehicleSpec(track.def().vehicle);
@@ -86,6 +175,9 @@ void Race::placeCar(Car& c, int idx, float lateral) {
     c.spin = 0;
     c.sinking = false;
     c.invuln = INVULN_TIME;
+    c.knock = 0;
+    c.yawKick = 0;
+    c.wedged = 0;
 }
 
 void Race::buildSpeedProfile() {
@@ -161,6 +253,9 @@ void Race::stepCar(Car& c, const Input& inRaw) {
     const VehicleSpec& v = *c.spec;
     c.invuln = std::max(0.0f, c.invuln - DT);
     c.gunCooldown = std::max(0.0f, c.gunCooldown - DT);
+    c.bumpSound = std::max(0.0f, c.bumpSound - DT);
+    const float knocked = clampf(c.knock / KNOCK_TIME, 0, 1);
+    c.knock = std::max(0.0f, c.knock - DT);
     c.lapTime += (c.finished || phase_ != Phase::Running) ? 0.0f : DT;
 
     if (c.state == CarState::Fall) {
@@ -186,13 +281,16 @@ void Race::stepCar(Car& c, const Input& inRaw) {
     int steer = (in.right ? 1 : 0) - (in.left ? 1 : 0);
     const bool playerSteering = c.human && !c.finished && phase_ == Phase::Running;
     c.heading += steer * v.turnRate * (playerSteering ? PLAYER_TURN_SCALE : 1.0f) * DT;
+    c.heading += c.yawKick * DT;
+    c.yawKick *= std::exp(-YAW_DECAY * DT);
+    if (std::abs(c.yawKick) < 0.02f) c.yawKick = 0;
     float h = playerSteering ? c.heading : quantize(c.heading);
     Vec2 f = fromAngle(h), r{-f.y, f.x};
 
     c.skid = 0;
     if (!air) {
         float vf = dot(c.vel, f), vl = dot(c.vel, r);
-        float accel = v.accel * fx.accel * c.speedMul;
+        float accel = v.accel * fx.accel * c.speedMul * lerpf(1.0f, KNOCK_THRUST, knocked);
         float drag = v.accel / v.topSpeed;
         if (in.gas) {
             vf += accel * DT;
@@ -203,14 +301,17 @@ void Race::stepCar(Car& c, const Input& inRaw) {
             vf -= vf * 0.5f * DT;  // engine braking while coasting
         }
         vf -= vf * (drag + fx.drag) * DT;
-        vl *= std::exp(-v.grip * fx.grip * DT);
+        vl *= std::exp(-v.grip * fx.grip * lerpf(1.0f, KNOCK_GRIP, knocked) * DT);   // a hit breaks the tyres loose
         c.vel = f * vf + r * vl;
         c.skid = std::abs(vl);
     }
 
     Vec2 prev = c.pos;
     c.pos += c.vel * DT;
-    if (!air) resolveWalls(c, prev);
+    if (!air) {
+        resolveWalls(c, prev);
+        if (c.wedged > WEDGED_TIME) { ++c.rescues; respawn(c); return; }
+    }
 
     if (c.z > 0 || c.vz != 0) {
         c.vz -= GRAVITY * DT;
@@ -257,34 +358,62 @@ void Race::stepCar(Car& c, const Input& inRaw) {
     }
 }
 
+bool Race::touchesWall(const Car& c, Vec2 pos) const {
+    bool hit = false;
+    forEachProbe(c, pos, [&](Vec2 p) { hit = hit || track_.at(p) == Surface::Wall; });
+    return hit;
+}
+
 void Race::resolveWalls(Car& c, Vec2 prevPos) {
-    static const int PROBES = 8;
-    const float r = c.spec->radius;
-    auto gather = [&](Vec2 p, Vec2& away) {
-        away = {};
-        bool hit = false;
-        for (int i = 0; i < PROBES; ++i) {
-            Vec2 d = fromAngle(TAU * i / PROBES);
-            if (track_.at(p + d * r) == Surface::Wall) { away -= d; hit = true; }
+    Vec2 towardFree, towardCar, hitSum;
+    int hits = 0;
+    forEachProbe(c, c.pos, [&](Vec2 p) {
+        if (track_.at(p) != Surface::Wall) return;
+        ++hits;
+        hitSum += p;
+        towardCar += c.pos - p;
+        for (int a = 0; a < 12; ++a) {
+            Vec2 d = fromAngle(TAU * a / 12);
+            if (track_.at(p + d * 7.0f) != Surface::Wall) towardFree += d;
         }
-        return hit;
-    };
+    });
+    if (hits == 0) { c.wedged = 0; return; }
 
-    Vec2 away;
-    if (!gather(c.pos, away)) return;
-    if (len2(away) < 1e-3f) { c.pos = prevPos; c.vel = c.vel * -0.3f; return; }
+    // Use the real way out of the object. A thin object has free space on both sides,
+    // so in that case fall back on the direction back towards the car.
+    Vec2 n;
+    if (len2(towardFree) > 1.0f && dot(towardFree, towardCar) > 0) n = norm(towardFree);
+    else if (len2(towardCar) > 1e-3f) n = norm(towardCar);
+    else { c.pos = prevPos; c.vel = c.vel * -0.3f; c.wedged += DT; return; }
 
-    Vec2 n = norm(away);
-    for (int i = 0; i < 8; ++i) {
+    const Vec2 start = c.pos;
+    bool clear = false;
+    for (int i = 0; i < 14 && !clear; ++i) {
         c.pos += n;
-        Vec2 tmp;
-        if (!gather(c.pos, tmp)) break;
+        clear = !touchesWall(c, c.pos);
     }
-    float vn = dot(c.vel, n);
-    if (vn < 0) {
-        Vec2 tangent = c.vel - n * vn;
-        c.vel = tangent * 0.92f - n * (vn * RESTITUTION_WALL);
-        if (vn < -40) emit(EventType::Wall, c.pos, c.id, -vn / c.spec->topSpeed);
+    if (clear) {
+        c.wedged = 0;
+    } else {
+        c.pos = touchesWall(c, prevPos) ? start : prevPos;
+        c.wedged += DT;
+    }
+
+    const float vn = dot(c.vel, n);
+    if (vn >= 0) return;
+    const Vec2 tangent = c.vel - n * vn;
+    const bool realHit = vn < -WALL_HIT_SPEED;
+    float out = -vn * RESTITUTION_WALL;
+    if (realHit) out = std::max(out, WALL_MIN_BOUNCE);
+    c.vel = tangent * WALL_SCRAPE + n * out;
+    if (!realHit) return;
+
+    applyKnock(c, 0.7f);
+    addYaw(c, cross(hitSum * (1.0f / hits) - c.pos, n) * (out - vn));
+    limitSpeed(c);
+    if (c.bumpSound <= 0) {
+        c.bumpSound = 0.1f;
+        emit(EventType::Wall, c.pos, c.id, -vn / c.spec->topSpeed);
     }
 }
 
@@ -297,10 +426,42 @@ void Race::startFall(Car& c, bool sink) {
     emit(sink ? EventType::Splash : EventType::Fall, c.pos, c.id);
 }
 
+bool Race::spotIsClear(const Car& c, int idx, float lateral) const {
+    const Sample& s = track_.samples()[track_.wrap(idx)];
+    Car probe = c;
+    probe.pos = s.pos + s.normal * lateral;
+    probe.heading = std::atan2(s.tan.y, s.tan.x);
+    const Surface ground = track_.at(probe.pos);
+    if (ground == Surface::Void || ground == Surface::Water || touchesWall(probe, probe.pos)) return false;
+
+    const CarBox box = carBox(probe, RESPAWN_CLEARANCE);
+    for (const Car& o : cars_) {
+        if (o.id == c.id || o.state != CarState::Drive || o.z > MAX_AIR_GAP) continue;
+        Vec2 n;
+        float depth;
+        if (boxesOverlap(box, carBox(o), n, depth)) return false;
+    }
+    return true;
+}
+
 void Race::respawn(Car& c) {
-    int idx = track_.respawnIndex(c.safeIdx);
+    // Start on the racing line, which is clear of props, and look nearby if a car is parked there.
+    const int base = track_.respawnIndex(c.safeIdx);
+    const float limit = track_.halfWidth() - 12.0f;
+    int idx = base;
+    float lateral = track_.samples()[track_.wrap(base)].line;
+    bool found = false;
+    for (int back = 0; back <= 48 && !found; back += 12) {
+        const int i = track_.wrap(base - back);
+        const float line = track_.samples()[i].line;
+        for (float offset : {0.0f, 24.0f, -24.0f, 44.0f, -44.0f}) {
+            const float candidate = clampf(line + offset, -limit, limit);
+            if (spotIsClear(c, i, candidate)) { idx = i; lateral = candidate; found = true; break; }
+        }
+    }
+
     int prevLaps = c.lapsDone;
-    placeCar(c, idx, track_.samples()[track_.wrap(idx)].line);   // the line is clear of props
+    placeCar(c, idx, lateral);
     c.lapsDone = prevLaps;
     emit(EventType::Respawn, c.pos, c.id);
 }
@@ -333,31 +494,72 @@ void Race::updateProgress(Car& c) {
 }
 
 void Race::collideCars() {
-    for (size_t i = 0; i < cars_.size(); ++i) {
-        for (size_t j = i + 1; j < cars_.size(); ++j) {
-            Car& a = cars_[i];
-            Car& b = cars_[j];
-            if (a.state != CarState::Drive || b.state != CarState::Drive) continue;
-            if (a.invuln > 0 || b.invuln > 0) continue;
-            if (std::abs(a.z - b.z) > 8.0f) continue;
-            Vec2 d = b.pos - a.pos;
-            float minD = a.spec->radius + b.spec->radius;
-            float dist2 = len2(d);
-            if (dist2 >= minD * minD || dist2 < 1e-4f) continue;
-            float dist = std::sqrt(dist2);
-            Vec2 n = d * (1.0f / dist);
-            float total = a.spec->mass + b.spec->mass;
-            float overlap = minD - dist;
-            a.pos -= n * (overlap * b.spec->mass / total);
-            b.pos += n * (overlap * a.spec->mass / total);
-            float rel = dot(b.vel - a.vel, n);
-            if (rel < 0) {
-                float impulse = -(1 + RESTITUTION_CAR) * rel / (1 / a.spec->mass + 1 / b.spec->mass);
-                a.vel -= n * (impulse / a.spec->mass);
-                b.vel += n * (impulse / b.spec->mass);
-                if (rel < -20) emit(EventType::Bump, (a.pos + b.pos) * 0.5f, (int)i, -rel / 200.0f);
+    const int count = (int)cars_.size();
+    bool bounced[4][4] = {};   // separating can take several passes, but each pair bounces once a tick
+    for (int pass = 0; pass < SOLVER_PASSES; ++pass) {
+        bool anyOverlap = false;
+        for (int i = 0; i < count; ++i) {
+            for (int j = i + 1; j < count; ++j) {
+                Car& a = cars_[i];
+                Car& b = cars_[j];
+                if (a.state != CarState::Drive || b.state != CarState::Drive) continue;
+                if (std::abs(a.z - b.z) > MAX_AIR_GAP) continue;
+                Vec2 n;
+                float depth;
+                if (!boxesOverlap(carBox(a), carBox(b), n, depth)) continue;
+                anyOverlap = true;
+                separateCars(a, b, n, depth);
+                if (!bounced[i][j]) {
+                    bounced[i][j] = true;
+                    bounceCars(a, b, n);
+                }
             }
         }
+        if (!anyOverlap) break;
+    }
+}
+
+void Race::separateCars(Car& a, Car& b, Vec2 n, float depth) {
+    const float total = a.spec->mass + b.spec->mass;
+    const float push = depth + SEPARATION_SKIN;
+    Vec2 moveA = n * (-push * b.spec->mass / total);
+    Vec2 moveB = n * (push * a.spec->mass / total);
+
+    // A car pinned against an object cannot give way, so the other one moves instead.
+    const bool aPinned = touchesWall(a, a.pos + moveA);
+    const bool bPinned = touchesWall(b, b.pos + moveB);
+    if (aPinned && !bPinned) { moveA = {}; moveB = n * push; }
+    else if (bPinned && !aPinned) { moveB = {}; moveA = n * -push; }
+    a.pos += moveA;
+    b.pos += moveB;
+}
+
+void Race::bounceCars(Car& a, Car& b, Vec2 n) {
+    const float closing = dot(a.vel - b.vel, n);
+    if (closing <= 0) return;   // already moving apart
+
+    float separation = closing * RESTITUTION_CAR;
+    if (closing > MIN_CLOSING) separation = std::max(separation, MIN_CAR_BOUNCE);
+    const float invA = 1.0f / a.spec->mass, invB = 1.0f / b.spec->mass;
+    const float impulse = (closing + separation) / (invA + invB);
+    a.vel -= n * (impulse * invA);
+    b.vel += n * (impulse * invB);
+
+    const float hardness = clampf(closing / 150.0f, 0.4f, 1.0f);
+    applyKnock(a, hardness);
+    applyKnock(b, hardness);
+
+    const CarBox boxA = carBox(a), boxB = carBox(b);
+    const Vec2 contact = (supportPoint(boxA, n) + supportPoint(boxB, n * -1.0f)) * 0.5f;
+    addYaw(a, cross(contact - a.pos, n * -1.0f) * (impulse * invA));
+    addYaw(b, cross(contact - b.pos, n) * (impulse * invB));
+
+    limitSpeed(a);
+    limitSpeed(b);
+
+    if (closing > 20.0f && a.bumpSound <= 0 && b.bumpSound <= 0) {
+        a.bumpSound = b.bumpSound = 0.1f;
+        emit(EventType::Bump, contact, a.id, closing / 200.0f);
     }
 }
 
@@ -454,7 +656,9 @@ Input Race::aiInput(Car& c) {
             if (o.id == c.id || o.state != CarState::Drive || o.invuln > 0) continue;
             Vec2 d = o.pos - c.pos;
             float dist = len(d);
-            if (dist < 200.0f && dot(d, f) > dist * 0.97f && (rng_() % 100) < 3) { in.fire = true; break; }
+            // Computer tanks mostly save their shells for the player, or the pack stalls in a pile-up.
+            const uint32_t chance = o.human ? 3u : 1u;
+            if (dist < 200.0f && dot(d, f) > dist * 0.97f && (rng_() % 100) < chance) { in.fire = true; break; }
         }
     }
     return in;
