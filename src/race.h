@@ -49,6 +49,12 @@ struct Car {
     int place = 0;
     float speedMul = 1;
 
+    // Collision response
+    float knock = 0;       // seconds left of reduced grip after a hit
+    float yawKick = 0;     // rad/s of spin from an off-centre hit
+    float bumpSound = 0;   // stops one long scrape from rattling the speaker
+    float wedged = 0;      // seconds spent unable to get clear of an object
+
     // AI
     float aiBias = 0, aiStuck = 0, aiReverse = 0;
 
@@ -71,6 +77,9 @@ struct RaceConfig {
     int laps = 3;
     uint32_t seed = 1;
 };
+
+// How far two cars' collision boxes overlap, or 0 if they do not touch.
+float carOverlapDepth(const Car& a, const Car& b);
 
 class Race {
 public:
@@ -98,6 +107,9 @@ public:
     bool suddenDeath() const { return suddenDeath_; }
     std::vector<int> standings() const;
 
+    // Lets the tests stage a collision by placing cars directly.
+    Car& carForTest(int i) { return cars_[i]; }
+
 private:
     void stepCar(Car& c, const Input& in);
     void startFall(Car& c, bool sink);
@@ -105,7 +117,11 @@ private:
     void placeCar(Car& c, int idx, float lateral);
     void updateProgress(Car& c);
     void resolveWalls(Car& c, Vec2 prevPos);
+    bool touchesWall(const Car& c, Vec2 pos) const;
+    bool spotIsClear(const Car& c, int idx, float lateral) const;
     void collideCars();
+    void separateCars(Car& a, Car& b, Vec2 n, float depth);
+    void bounceCars(Car& a, Car& b, Vec2 n);
     void stepShells();
     Input aiInput(Car& c);
     void buildSpeedProfile();

@@ -145,7 +145,7 @@ Speeds are in pixels per second, acceleration in pixels per second squared, turn
 Other rules worth knowing:
 
 - Cars bounce hard off each other, so a well-timed shove can send a rival into an obstacle or off the table.
-- After a fall you reappear on the racing line at the last safe spot, and pass through other cars for 1.6 seconds while flickering. If you fell at a jump, you restart with a run-up.
+- After a fall you reappear near the last safe spot, in a space clear of other cars and obstacles, and flicker for 1.6 seconds while shells cannot hit you. If you fell at a jump, you restart with a run-up.
 - The ground beside the route is open, but going more than about 100 pixels past the route's edge puts you straight back on course.
 - A ramp launches you as you leave it, so the faster you hit it the further you fly. Too slow and you land in the gap.
 - A tank shell spins its target for 0.8 seconds, and the target is briefly protected from further hits.
@@ -179,6 +179,8 @@ The code is split into two layers. `psp_core` (`track`, `tracks`, `props`, `race
 
 **Handling.** Each tick, a car's velocity is split into forward and sideways parts. Throttle and drag act on the forward part, and grip decays the sideways part, so a car that turns keeps sliding in its old direction until the grip catches up. Surfaces scale acceleration, grip and drag.
 
+**Collisions.** Each car is a box matched to its sprite. Cars are tested against each other with the separating-axis test and pushed apart over several passes per tick, so a push can ripple through a pile of cars, and a car pinned against an object stays put while the other one moves. Objects are tested with probe points around the car's outline, using the surface map to find the true direction out of whatever was hit. A hit bounces both cars, briefly breaks the tyres' grip so the bounce carries them away, and adds spin if it lands off-centre.
+
 **Building a course.** Each course is generated when it loads, in a few stages:
 
 1. Control points are turned into a closed Catmull-Rom spline and resampled every 4 pixels.
@@ -202,7 +204,7 @@ World scale is about 6 pixels per centimetre, so a dinner plate is around 170 pi
 
 | What you want to change                 | Where                                                     |
 |-----------------------------------------|-----------------------------------------------------------|
-| Vehicle speed, grip, weight             | `vehicleSpec` in `src/tracks.cpp`                         |
+| Vehicle speed, grip, weight, hit box    | `vehicleSpec` in `src/tracks.cpp`                         |
 | How fast the player's car turns         | `PLAYER_TURN_SCALE` at the top of `src/race.cpp`          |
 | Jump arc, bounciness, respawn timing    | Constants at the top of `src/race.cpp`                    |
 | Surface effects                         | `surfaceFx` in `src/race.cpp`                             |
@@ -245,6 +247,7 @@ Run `build\Release\psp_simtest.exe` directly to see the full report. For every c
 - no starting grid position is inside an object, and the racing line is clear
 - computer cars finish at two skill levels
 - a bot using the player's steering finishes
+- cars never visibly overlap during a race, and staged crashes against cars and objects bounce apart
 - head-to-head matches terminate and award points correctly
 - a player who never moves loses every point in head-to-head and finishes last in a race
 

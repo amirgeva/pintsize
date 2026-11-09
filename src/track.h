@@ -13,7 +13,8 @@ struct VehicleSpec {
     float turnRate;    // rad/s; applies at any speed, including standing still
     float grip;        // 1/s decay of sideways velocity; low values slide more
     float mass;
-    float radius;
+    float radius;      // used for shell hits
+    float halfLength, halfWidth;   // collision box, matched to the sprite
     float roughScale;  // 1 = full off-road penalty, 0 = none
     bool hasGun;
 };
