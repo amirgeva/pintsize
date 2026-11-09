@@ -553,8 +553,10 @@ void Game::drawResult() {
     }
     case Screen::H2HResult: {
         int w = race_->matchWinner();
-        std::snprintf(buf, sizeof buf, "%s WINS!", w >= 0 ? (race_->config().humans == 2 ? (w == 0 ? "PLAYER 1" : "PLAYER 2") : (w == 0 ? "YOU" : "CPU")) : "NOBODY");
-        drawPanel(buf, GOLD);
+        const char* headline = w < 0 ? "NOBODY WINS!"
+            : race_->config().humans == 2 ? (w == 0 ? "PLAYER 1 WINS!" : "PLAYER 2 WINS!")
+            : (w == 0 ? "YOU WIN!" : "CPU WINS!");
+        drawPanel(headline, GOLD);
         std::snprintf(buf, sizeof buf, "%d - %d", race_->points(0), race_->points(1));
         gfx_.text(VIEW_W / 2, 110, buf, WHITE, 4, 1);
         break;
