@@ -51,8 +51,49 @@ static int runShot(int argc, char** argv) {
     return 0;
 }
 
+// --record <dir> <title|menu|race:N|h2h:N> <skipTicks> <frames> <ticksPerFrame>
+// Like --shot, but saves a sequence <dir>/f0000.bmp... for building gameplay clips.
+static int runRecord(int argc, char** argv) {
+    if (argc < 7) return 2;
+    SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, VIEW_W, VIEW_H, 32, SDL_PIXELFORMAT_ARGB8888);
+    SDL_Renderer* renderer = SDL_CreateSoftwareRenderer(surface);
+    if (!renderer) { std::fprintf(stderr, "renderer: %s\n", SDL_GetError()); return 1; }
+
+    Audio silent;
+    {
+        Game game(renderer, &silent);
+        std::string what = argv[3];
+        int skip = std::atoi(argv[4]), frames = std::atoi(argv[5]), step = std::atoi(argv[6]);
+        if (what == "title") {
+            // the game opens on the title screen
+        } else if (what == "menu") {
+            game.showMainMenu();
+        } else {
+            size_t colon = what.find(':');
+            int track = colon == std::string::npos ? 0 : std::atoi(what.c_str() + colon + 1);
+            game.startDemo(track, what.rfind("h2h", 0) == 0 ? RaceMode::HeadToHead : RaceMode::Circuit);
+        }
+        for (int i = 0; i < skip; ++i) game.tick();
+        for (int f = 0; f < frames; ++f) {
+            for (int i = 0; i < step; ++i) game.tick();
+            game.draw();
+            SDL_RenderPresent(renderer);
+            char path[1024];
+            std::snprintf(path, sizeof path, "%s/f%04d.bmp", argv[2], f);
+            SDL_SaveBMP(surface, path);
+        }
+    }
+    SDL_DestroyRenderer(renderer);
+    SDL_FreeSurface(surface);
+    SDL_Quit();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--shot") == 0) return runShot(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "--record") == 0) return runRecord(argc, argv);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Pint-Size Prix", SDL_GetError(), nullptr);

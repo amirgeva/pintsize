@@ -1,5 +1,7 @@
 # Pint-Size Prix
 
+![Pint-Size Prix gameplay](docs/intro.gif)
+
 A top-down miniature racing game written in C++17 with SDL2. Thumb-sized vehicles race across everyday places: a breakfast table, a woodworking bench, a freezer drawer, a sink full of dishes, an office desk and a backyard sandbox.
 
 The game is built for the keyboard, including two players sharing one. All artwork and sound are generated in code when the game runs, so the repository contains no asset files.
