@@ -184,6 +184,11 @@ std::vector<TrackDef> buildTracks() {
 }
 }  // namespace
 
+const char* driverName(int i) {
+    static const char* names[NUM_DRIVERS] = {"DOT", "RIVET", "PIXIE", "BOLT", "GUS", "MOTH"};
+    return i >= 0 && i < NUM_DRIVERS ? names[i] : "?";
+}
+
 const std::vector<TrackDef>& allTracks() {
     static const std::vector<TrackDef> tracks = buildTracks();
     return tracks;
