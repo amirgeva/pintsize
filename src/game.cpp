@@ -13,6 +13,11 @@ const SDL_Color SHADE{0, 0, 0, 150};
 
 constexpr int START_LIVES = 3;
 constexpr int STREAK_FOR_LIFE = 3;
+constexpr int MAX_CATCH_UP = 8;   // steps a LAN race may take in one frame to catch up with the shared clock
+
+// F9 cycles through these simulated connections during LAN play.
+const NetConditions NET_PRESETS[] = {{0, 0, 0}, {20, 5, 1}, {50, 15, 3}, {100, 30, 5}, {200, 60, 10}};
+constexpr int NUM_NET_PRESETS = (int)(sizeof NET_PRESETS / sizeof NET_PRESETS[0]);
 
 std::string formatTime(float t) {
     if (t < 0) t = 0;
@@ -59,7 +64,7 @@ void Game::saveBest() {
 void Game::go(Screen s) {
     screen_ = s;
     menu_ = 0;
-    bool racing = s == Screen::Racing || s == Screen::Paused;
+    bool racing = s == Screen::Racing || s == Screen::Paused || s == Screen::LanPaused;
     audio_->setMusic(!racing);
     if (s != Screen::Racing) {
         audio_->setEngine(0, 0, false);
@@ -163,7 +168,8 @@ void Game::activateMain() {
     case 1: beginFlow(Flow::H2HCpu); break;
     case 2: beginFlow(Flow::H2HTwo); break;
     case 3: beginFlow(Flow::Trial); break;
-    case 4: go(Screen::Controls); break;
+    case 4: go(Screen::LanMenu); break;
+    case 5: go(Screen::Controls); break;
     default: quit_ = true; break;
     }
 }
@@ -174,6 +180,12 @@ void Game::handleEvent(const SDL_Event& e) {
 
 void Game::onKey(SDL_Keycode key) {
     if (key == SDLK_m) { audio_->toggleMute(); return; }
+    if (key == SDLK_F9) {   // cycle the simulated connection
+        netPreset_ = (netPreset_ + 1) % NUM_NET_PRESETS;
+        setNetConditions(NET_PRESETS[netPreset_]);
+        return;
+    }
+    if (key == SDLK_F10) { netInfo_ = !netInfo_; return; }
     const bool confirm = key == SDLK_RETURN || key == SDLK_SPACE || key == SDLK_KP_ENTER;
     const int tracks = (int)allTracks().size();
 
@@ -183,8 +195,8 @@ void Game::onKey(SDL_Keycode key) {
         else if (key == SDLK_ESCAPE) quit_ = true;
         break;
     case Screen::Main:
-        if (key == SDLK_UP) menuMove(-1, 6);
-        else if (key == SDLK_DOWN) menuMove(1, 6);
+        if (key == SDLK_UP) menuMove(-1, 7);
+        else if (key == SDLK_DOWN) menuMove(1, 7);
         else if (confirm) activateMain();
         else if (key == SDLK_ESCAPE) go(Screen::Title);
         break;
@@ -210,7 +222,57 @@ void Game::onKey(SDL_Keycode key) {
         else if (key == SDLK_ESCAPE) go(Screen::Main);
         break;
     case Screen::Racing:
-        if (key == SDLK_ESCAPE) go(Screen::Paused);
+        // A LAN race cannot stop for one player, so Esc only offers a way out.
+        if (key == SDLK_ESCAPE) go(flow_ == Flow::Lan ? Screen::LanPaused : Screen::Paused);
+        break;
+    case Screen::LanMenu:
+        if (key == SDLK_UP) menuMove(-1, 3);
+        else if (key == SDLK_DOWN) menuMove(1, 3);
+        else if (key == SDLK_ESCAPE) go(Screen::Main);
+        else if (confirm) {
+            audio_->play(Sfx::Select);
+            if (menu_ == 0) startLanHost();
+            else if (menu_ == 1) { search_ = std::make_unique<NetSearch>(); go(Screen::LanSearch); }
+            else go(Screen::Main);
+        }
+        break;
+    case Screen::LanSearch: {
+        const int found = search_ ? (int)search_->hosts().size() : 0;
+        if (key == SDLK_UP && found) menuMove(-1, found);
+        else if (key == SDLK_DOWN && found) menuMove(1, found);
+        else if (key == SDLK_ESCAPE) { search_.reset(); go(Screen::LanMenu); }
+        else if (confirm && menu_ < found) {
+            audio_->play(Sfx::Select);
+            const NetFoundHost h = search_->hosts()[menu_];
+            search_.reset();
+            lanJoin(h.address, h.port);
+        }
+        break;
+    }
+    case Screen::LanLobby:
+        lanLobbyKey(key, confirm);
+        break;
+    case Screen::LanPaused:
+        if (key == SDLK_UP) menuMove(-1, 2);
+        else if (key == SDLK_DOWN) menuMove(1, 2);
+        else if (key == SDLK_ESCAPE) go(Screen::Racing);
+        else if (confirm) {
+            audio_->play(Sfx::Select);
+            if (menu_ == 0) go(Screen::Racing);
+            else lanLeave("");
+        }
+        break;
+    case Screen::LanResult:
+        if (confirm) {
+            audio_->play(Sfx::Select);
+            if (net_ && net_->isHost()) net_->endRace();
+            go(Screen::LanLobby);
+        } else if (key == SDLK_ESCAPE) {
+            lanLeave("");
+        }
+        break;
+    case Screen::LanMessage:
+        if (confirm || key == SDLK_ESCAPE) { audio_->play(Sfx::Select); go(Screen::Main); }
         break;
     case Screen::Paused:
         if (key == SDLK_UP) menuMove(-1, 3);
@@ -248,7 +310,9 @@ void Game::onKey(SDL_Keycode key) {
 Input Game::readPlayer(int player) const {
     const Uint8* k = SDL_GetKeyboardState(nullptr);
     Input in;
-    const bool two = race_ && race_->config().humans == 2;
+    int local = 0;   // players at this keyboard; in a LAN race the others are on other machines
+    if (race_) for (const Car& c : race_->cars()) local += c.humanIndex >= 0 ? 1 : 0;
+    const bool two = local == 2;
     if (!two) {
         // Alone at the keyboard, either side of it works.
         in.left = k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_A];
@@ -293,7 +357,7 @@ void Game::playEvents() {
 
     float skid = 0;
     for (const Car& c : race_->cars()) {
-        if (!c.human) continue;
+        if (c.humanIndex < 0) continue;   // engines are for the players at this machine
         bool on = c.state == CarState::Drive;
         audio_->setEngine(c.humanIndex, clampf(len(c.vel) / c.spec->topSpeed, 0, 1.2f), on);
         if (on && c.z <= 0 && c.surface != Surface::Rough && c.skid > 62.0f) skid = 1;
@@ -303,6 +367,9 @@ void Game::playEvents() {
 
 void Game::tick() {
     ++frame_;
+    if (net_) lanTick();
+    if (search_) search_->poll();
+    if (flow_ == Flow::Lan) return;   // LAN races step in frame(), in time with the host's clock
     if (screen_ != Screen::Racing || !race_) return;
     Input in[2] = {readPlayer(0), readPlayer(1)};
     if (demo_) in[0] = in[1] = Input{};
@@ -342,7 +409,146 @@ void Game::finishRace() {
         go(Screen::TrialResult);
         break;
     }
+    case Flow::Lan:
+        go(Screen::LanResult);
+        break;
     }
+}
+
+// ---------------------------------------------------------------- LAN play
+
+void Game::setNetConditions(const NetConditions& c) {
+    netSim_ = c;
+    if (net_) net_->setConditions(c);
+}
+
+void Game::startLanHost() {
+    search_.reset();
+    net_ = std::make_unique<NetSession>();
+    net_->setConditions(netSim_);
+    NetPlayer me;
+    me.name = netLocalName();
+    me.color = playerColor_;
+    std::string error;
+    if (!net_->host(me, NET_PORT, error)) { lanLeave("CANNOT HOST: " + error); return; }
+    flow_ = Flow::Lan;
+    net_->setTrack(trackIndex_);
+    go(Screen::LanLobby);
+}
+
+void Game::startLanJoin(const std::string& address) {
+    std::string host;
+    uint16_t port = NET_PORT;
+    if (!netParseAddress(address, host, port)) { lanLeave("BAD ADDRESS " + address); return; }
+    lanJoin(host, port);
+}
+
+void Game::lanJoin(const std::string& host, uint16_t port) {
+    net_ = std::make_unique<NetSession>();
+    net_->setConditions(netSim_);
+    NetPlayer me;
+    me.name = netLocalName();
+    me.color = playerColor_;
+    std::string error;
+    if (!net_->join(me, host, port, error)) { lanLeave(error); return; }
+    flow_ = Flow::Lan;
+    lanAddress_ = host;
+    go(Screen::LanLobby);
+}
+
+void Game::lanLeave(const std::string& message) {
+    net_.reset();
+    search_.reset();
+    race_.reset();
+    lanLive_ = false;
+    flow_ = Flow::Tournament;
+    if (message.empty()) { go(Screen::Main); return; }
+    lanMessage_ = message;
+    go(Screen::LanMessage);
+}
+
+// Runs every tick in any LAN screen: keeps the session alive and follows the host.
+void Game::lanTick() {
+    net_->poll(lanRacing() ? race_.get() : nullptr);
+    if (net_->closed()) { lanLeave(net_->reason()); return; }
+    NetStart s;
+    if (net_->takeStart(s)) { lanBeginRace(s); return; }
+    // The host went back to the lobby before this race finished here: show what there is.
+    if (lanRacing() && !net_->inRace()) finishRace();
+
+    // Rates for the F10 overlay, once a second.
+    if (++netStatsFrame_ >= 60) {
+        netStatsFrame_ = 0;
+        const NetStats st = net_->stats();
+        netRateIn_ = (float)(st.statesIn - netLast_.statesIn);
+        netLostRate_ = (float)(st.statesLost - netLast_.statesLost);
+        const int ages = st.ageCount - netLast_.ageCount;
+        netAge_ = ages > 0 ? (float)((st.ageSumMs - netLast_.ageSumMs) / ages) : 0.0f;
+        netLast_ = st;
+    }
+}
+
+void Game::lanBeginRace(const NetStart& s) {
+    trackIndex_ = s.track;
+    loadTrack(s.track);   // can take a moment; the host waits until every machine says it is ready
+    if (track_->count() != s.samples) { lanLeave("THIS COURSE DIFFERS FROM THE HOST'S - DIFFERENT VERSIONS?"); return; }
+    race_ = std::make_unique<Race>(*track_, s.cfg);
+    gfx_.resetFx();
+    lanLive_ = false;
+    net_->ready();
+    go(Screen::Racing);
+}
+
+void Game::frame() {
+    if (!net_ || !lanRacing()) return;
+    net_->poll(race_.get());
+    if (net_->closed()) { lanLeave(net_->reason()); return; }
+    if (!lanLive_ && net_->started()) lanLive_ = true;
+    if (!lanLive_) return;
+
+    Input in[2] = {readPlayer(0), readPlayer(1)};
+    if (screen_ == Screen::LanPaused) in[0] = in[1] = Input{};   // the menu is up: let go of the controls
+    for (int i = 0; i < MAX_CATCH_UP && race_->ticks() < net_->ticksDue(); ++i) {
+        race_->step(in);
+        net_->send(*race_);
+        gfx_.updateFx(*race_);
+        playEvents();
+    }
+    if (race_->phase() == Phase::Finished && race_->sinceFinished() > 2.5f) finishRace();
+}
+
+void Game::lanLobbyKey(SDL_Keycode key, bool confirm) {
+    if (key == SDLK_ESCAPE) { audio_->play(Sfx::Select); lanLeave(""); return; }
+    if (!net_ || !net_->isHost() || net_->inRace()) return;   // only the host changes the race
+    const int tracks = (int)allTracks().size();
+    const NetLobby& lobby = net_->lobby();
+    if (key == SDLK_LEFT || key == SDLK_RIGHT) {
+        trackIndex_ = (lobby.track + (key == SDLK_LEFT ? tracks - 1 : 1)) % tracks;
+        net_->setTrack(trackIndex_);
+        audio_->play(Sfx::Move);
+    } else if (key == SDLK_UP || key == SDLK_DOWN) {
+        net_->setCpuCars(lobby.cpuCars + (key == SDLK_UP ? 1 : -1));
+        audio_->play(Sfx::Move);
+    } else if (confirm) {
+        audio_->play(Sfx::Select);
+        loadTrack(lobby.track);
+        net_->startRace(SDL_GetTicks() | 1u, track_->count());
+    }
+}
+
+// The player's name for a machine's own car, or CPU for the host's computer cars and for cars
+// whose machine has left.
+std::string Game::lanCarName(int car) const {
+    if (!race_ || !net_) return "CPU";
+    const Car& c = race_->cars()[car];
+    for (const Car& o : race_->cars()) {
+        if (o.driver != c.driver) continue;
+        if (o.id != car) return "CPU";   // not the machine's first car
+        break;
+    }
+    for (const NetPlayer& p : net_->lobby().players)
+        if (p.slot == c.driver) return p.name;
+    return "CPU";
 }
 
 // ---------------------------------------------------------------- drawing
@@ -351,7 +557,28 @@ void Game::draw() {
     switch (screen_) {
     case Screen::Title: drawTitle(); break;
     case Screen::Main:
-        drawMenu("PINT-SIZE PRIX", {"TOURNAMENT", "HEAD TO HEAD VS CPU", "HEAD TO HEAD 2 PLAYERS", "TIME TRIAL", "CONTROLS", "QUIT"});
+        drawMenu("PINT-SIZE PRIX", {"TOURNAMENT", "HEAD TO HEAD VS CPU", "HEAD TO HEAD 2 PLAYERS", "TIME TRIAL", "LAN RACE", "CONTROLS", "QUIT"});
+        break;
+    case Screen::LanMenu:
+        drawMenu("LAN RACE", {"HOST A RACE", "JOIN A RACE", "BACK"});
+        break;
+    case Screen::LanSearch: drawLanSearch(); break;
+    case Screen::LanLobby: drawLanLobby(); break;
+    case Screen::LanResult: drawLanResult(); break;
+    case Screen::LanMessage:
+        drawPanel("LAN RACE", RED);
+        gfx_.text(VIEW_W / 2, 110, lanMessage_.c_str(), WHITE, 1, 1);
+        gfx_.text(VIEW_W / 2, VIEW_H - 18, "PRESS ENTER", GREY, 1, 1);
+        break;
+    case Screen::LanPaused:
+        gfx_.drawRace(*race_);
+        drawHud();
+        gfx_.fill(0, 0, VIEW_W, VIEW_H, SHADE);
+        gfx_.text(VIEW_W / 2, 70, "THE RACE GOES ON", GOLD, 2, 1);
+        {
+            const char* items[2] = {"BACK TO THE RACE", "LEAVE THE RACE"};
+            for (int i = 0; i < 2; ++i) gfx_.text(VIEW_W / 2, 120 + i * 18, items[i], i == menu_ ? GOLD : WHITE, 1, 1);
+        }
         break;
     case Screen::Controls: drawControls(); break;
     case Screen::Driver: drawDriver(); break;
@@ -361,6 +588,7 @@ void Game::draw() {
         gfx_.drawRace(*race_);
         drawHud();
         if (race_->phase() == Phase::Countdown) drawCountdown();
+        if (flow_ == Flow::Lan && !lanLive_) gfx_.text(VIEW_W / 2, 100, "WAITING FOR EVERYONE", WHITE, 2, 1);
         break;
     case Screen::Paused:
         gfx_.drawRace(*race_);
@@ -372,6 +600,11 @@ void Game::draw() {
         }
         break;
     default: drawResult(); break;
+    }
+    if (lanRacing()) drawNetInfo();
+    if ((screen_ == Screen::LanLobby || screen_ == Screen::LanSearch) && netSim_.active()) {
+        const std::string sim = "SIMULATED CONNECTION " + netDescribe(netSim_) + " - F9 TO CHANGE";
+        gfx_.text(VIEW_W / 2, 240, sim.c_str(), RED, 1, 1);
     }
 }
 
@@ -490,7 +723,7 @@ void Game::drawHud() {
         return;
     }
 
-    const Car& me = cars[0];
+    const Car& me = cars[race_->focus()];
     int lap = std::min(cfg.laps, std::max(1, me.lapsDone + 1));
     gfx_.fill(4, 4, 96, 30, SHADE);
     std::snprintf(buf, sizeof buf, "LAP %d/%d", lap, cfg.laps);
@@ -510,7 +743,7 @@ void Game::drawHud() {
 
     auto order = race_->standings();
     int myPlace = 1;
-    for (size_t i = 0; i < order.size(); ++i) if (order[i] == 0) myPlace = (int)i + 1;
+    for (size_t i = 0; i < order.size(); ++i) if (order[i] == me.id) myPlace = (int)i + 1;
     gfx_.fill(VIEW_W - 76, 4, 72, 30, SHADE);
     gfx_.text(VIEW_W - 8, 8, placeName(myPlace), myPlace <= 2 ? GREEN : RED, 1, 2);
     for (size_t i = 0; i < order.size(); ++i)
@@ -581,4 +814,128 @@ void Game::drawResult() {
     default: break;
     }
     gfx_.text(VIEW_W / 2, VIEW_H - 18, prompt, GREY, 1, 1);
+}
+
+void Game::drawLanSearch() {
+    gfx_.clear(BG);
+    gfx_.text(VIEW_W / 2, 24, "JOIN A RACE", GOLD, 3, 1);
+    const std::vector<NetFoundHost> none;
+    const auto& hosts = search_ ? search_->hosts() : none;
+    if (search_ && !search_->ok()) {
+        gfx_.text(VIEW_W / 2, 110, "CANNOT SEARCH THE NETWORK", RED, 1, 1);
+    } else if (hosts.empty()) {
+        const char* dots[] = {"", ".", "..", "..."};
+        std::string s = std::string("LOOKING FOR RACES ON YOUR NETWORK") + dots[(frame_ / 20) % 4];
+        gfx_.text(VIEW_W / 2 - 100, 100, s.c_str(), WHITE);
+        gfx_.text(VIEW_W / 2, 140, "NOTHING FOUND? START THE GAME WITH", GREY, 1, 1);
+        gfx_.text(VIEW_W / 2, 152, "--JOIN <ADDRESS> TO JOIN A HOST DIRECTLY", GREY, 1, 1);
+    }
+    for (int i = 0; i < (int)hosts.size() && i < 6; ++i) {
+        const NetFoundHost& h = hosts[i];
+        const bool sel = i == menu_;
+        const int y = 70 + i * 26;
+        if (sel) gfx_.fill(60, y - 5, VIEW_W - 120, 24, SDL_Color{60, 70, 120, 255});
+        char line[96];
+        std::snprintf(line, sizeof line, "%s - %s - %d/%d%s", h.name.c_str(), allTracks()[h.track].name, h.players, MAX_CARS,
+                      h.racing ? " - RACING" : "");
+        gfx_.text(VIEW_W / 2, y, line, sel ? GOLD : WHITE, 1, 1);
+        std::snprintf(line, sizeof line, "%s:%u", h.address.c_str(), h.port);
+        gfx_.text(VIEW_W / 2, y + 10, line, GREY, 1, 1);
+    }
+    gfx_.text(VIEW_W / 2, VIEW_H - 16, "UP/DOWN  ENTER: JOIN  ESC: BACK", GREY, 1, 1);
+}
+
+void Game::drawLanLobby() {
+    gfx_.clear(BG);
+    gfx_.text(VIEW_W / 2, 10, "LAN RACE", GOLD, 2, 1);
+    if (!net_) return;
+    const NetLobby& lobby = net_->lobby();
+    const bool host = net_->isHost();
+
+    const TrackDef& def = allTracks()[lobby.track];
+    gfx_.drawTrackPreview(def, SDL_Rect{20, 36, 200, 118}, GREEN);
+    gfx_.text(120, 162, def.name, WHITE, 1, 1);
+    std::string sub = std::string(themeInfo(def.theme).name) + " - " + vehicleSpec(def.vehicle).name;
+    gfx_.text(120, 174, sub.c_str(), GREY, 1, 1);
+    if (host) gfx_.text(120, 188, "< LEFT/RIGHT >", GREY, 1, 1);
+
+    gfx_.text(250, 40, "PLAYERS", GREY);
+    for (int i = 0; i < (int)lobby.players.size(); ++i) {
+        const NetPlayer& p = lobby.players[i];
+        const int y = 56 + i * 18;
+        gfx_.drawCar(def.vehicle, p.color % NUM_DRIVERS, 260, y + 3, 0.0f);
+        const bool me = p.slot == net_->self();
+        gfx_.text(276, y, p.name.c_str(), me ? GOLD : WHITE);
+        const char* tag = p.slot == 0 ? (p.bot ? "HOST BOT" : "HOST") : (p.bot ? "BOT" : "");
+        if (me) tag = p.slot == 0 ? "YOU, HOST" : "YOU";
+        gfx_.text(472, y, tag, GREY, 1, 2);
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "CPU CARS %d", lobby.cpuCars);
+    gfx_.text(250, 56 + 4 * 18 + 6, buf, WHITE);
+    if (host) gfx_.text(250, 56 + 4 * 18 + 18, "UP/DOWN TO CHANGE", GREY);
+
+    const char* status;
+    std::string line;
+    if (!net_->connected()) {
+        line = "CONNECTING TO " + lanAddress_ + "...";
+        status = line.c_str();
+    } else if (net_->inRace()) {
+        status = "STARTING...";
+    } else if (lobby.racing) {
+        status = "A RACE IS ON - YOU JOIN THE NEXT ONE";
+    } else if (host) {
+        line = lobby.players.size() < 2 ? "WAITING FOR PLAYERS TO JOIN" : "PRESS ENTER TO START";
+        status = line.c_str();
+    } else {
+        line = "WAITING FOR " + net_->hostName() + " TO START";
+        status = line.c_str();
+    }
+    gfx_.text(VIEW_W / 2, 214, status, WHITE, 1, 1);
+    if (host) {
+        std::snprintf(buf, sizeof buf, "HOSTING AS %s ON PORT %u%s", net_->hostName().c_str(), NET_PORT,
+                      net_->visible() ? "" : " - NOT FOUND BY SEARCHES");
+        gfx_.text(VIEW_W / 2, 228, buf, GREY, 1, 1);
+    }
+    gfx_.text(VIEW_W / 2, VIEW_H - 16, host ? "ENTER: START   ESC: CLOSE THE RACE" : "ESC: LEAVE", GREY, 1, 1);
+}
+
+void Game::drawLanResult() {
+    drawPanel("RACE RESULT", GOLD);
+    if (!race_) return;
+    const auto& cars = race_->cars();
+    for (size_t i = 0; i < lastOrder_.size(); ++i) {
+        const Car& c = cars[lastOrder_[i]];
+        const bool mine = !c.remote && c.humanIndex >= 0;
+        const SDL_Color col = mine ? GOLD : WHITE;
+        const int y = 80 + (int)i * 22;
+        gfx_.text(110, y, placeName((int)i + 1), col);
+        gfx_.drawCar(race_->track().def().vehicle, c.color, 152, y + 3, 0.0f);
+        gfx_.text(170, y, driverName(c.color), col);
+        gfx_.text(220, y, lanCarName(c.id).c_str(), mine ? GOLD : GREY);
+        if (c.finished && c.finishTime > 0) gfx_.text(370, y, formatTime(c.finishTime).c_str(), col, 1, 2);
+    }
+    gfx_.text(VIEW_W / 2, VIEW_H - 18, "ENTER: BACK TO THE LOBBY   ESC: LEAVE", GREY, 1, 1);
+}
+
+// The simulated connection, and with F10 the network statistics.
+void Game::drawNetInfo() {
+    std::vector<std::string> lines;
+    if (netSim_.active()) lines.push_back("SIMULATED " + netDescribe(netSim_) + " (F9)");
+    if (netInfo_) {
+        if (!netSim_.active()) lines.push_back("NO SIMULATED LAG (F9)");
+        if (net_) {
+            const NetStats st = net_->stats();
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "ROUND TRIP %.1fMS  CLOCK WITHIN %.1fMS", st.rttMs, st.clockMs);
+            lines.push_back(buf);
+            std::snprintf(buf, sizeof buf, "STATES %.0f/S  LOST %.0f/S  AGE %.0fMS", netRateIn_, netLostRate_, netAge_);
+            lines.push_back(buf);
+        }
+    }
+    if (lines.empty()) return;
+    const int h = (int)lines.size() * 10 + 4;
+    const int y0 = VIEW_H - 4 - h;
+    gfx_.fill(4, y0, 230, h, SHADE);
+    for (size_t i = 0; i < lines.size(); ++i) gfx_.text(8, y0 + 3 + (int)i * 10, lines[i].c_str(), i == 0 && netSim_.active() ? RED : WHITE);
 }

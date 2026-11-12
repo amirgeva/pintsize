@@ -68,11 +68,6 @@ uint32_t scaleColor(uint32_t c, float f) {
 SDL_Color col(int r, int g, int b, int a = 255) { return {(Uint8)r, (Uint8)g, (Uint8)b, (Uint8)a}; }
 }  // namespace
 
-const char* driverName(int i) {
-    static const char* names[NUM_DRIVERS] = {"DOT", "RIVET", "PIXIE", "BOLT", "GUS", "MOTH"};
-    return names[i];
-}
-
 SDL_Color driverColor(int i) {
     static const SDL_Color colors[NUM_DRIVERS] = {
         {226,58,52,255},{56,120,232,255},{240,198,44,255},{52,184,92,255},{170,80,216,255},{242,130,40,255}};
@@ -321,9 +316,9 @@ void Gfx::drawRace(const Race& race) {
     // Name tags over the human cars during the countdown.
     if (race.phase() == Phase::Countdown) {
         for (const Car& c : race.cars()) {
-            if (!c.human) continue;
+            if (c.humanIndex < 0) continue;   // only the players at this machine
             char tag[4] = {'P', (char)('1' + c.humanIndex), 0, 0};
-            text((int)c.pos.x - ox, (int)c.pos.y - oy - 20, tag, col(255, 255, 255), 1, 1);
+            text((int)c.pos.x - ox, (int)c.pos.y - oy - 20, race.networked() ? "YOU" : tag, col(255, 255, 255), 1, 1);
         }
     }
 }

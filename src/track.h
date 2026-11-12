@@ -76,6 +76,10 @@ struct TrackDef {
 };
 const std::vector<TrackDef>& allTracks();
 
+// The six drivers; a car's colour index picks one.
+constexpr int NUM_DRIVERS = 6;
+const char* driverName(int i);
+
 struct Sample {
     Vec2 pos, tan, normal;
     float curvature = 0;   // signed 1/radius; positive turns toward +normal
