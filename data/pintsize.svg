@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>Pint-Size Prix</title>
+  <!-- Tablecloth background -->
+  <rect x="2" y="2" width="60" height="60" rx="10" fill="#f4efe1"/>
+  <path d="M2 22h60M2 42h60M22 2v60M42 2v60" stroke="#d9473f" stroke-width="6" opacity="0.35"/>
+  <!-- Wheels -->
+  <rect x="14" y="13" width="9" height="12" rx="2" fill="#222"/>
+  <rect x="41" y="13" width="9" height="12" rx="2" fill="#222"/>
+  <rect x="14" y="40" width="9" height="12" rx="2" fill="#222"/>
+  <rect x="41" y="40" width="9" height="12" rx="2" fill="#222"/>
+  <!-- Body -->
+  <path d="M24 8h16l6 10v30l-4 8H22l-4-8V18z" fill="#2f6fd6" stroke="#173a73" stroke-width="2"/>
+  <!-- Windscreen and racing stripe -->
+  <path d="M25 20h14l3 8H22z" fill="#bfe3ff" stroke="#173a73" stroke-width="1.5"/>
+  <rect x="30" y="8" width="4" height="12" fill="#fff"/>
+  <rect x="30" y="32" width="4" height="22" fill="#fff"/>
+</svg>

@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+# Never download SDL2 during the build; Debian builds use the system library
+# and have no network access. Games are installed in /usr/games (Policy 11.11).
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-DPSP_FORCE_FETCH_SDL=OFF \
+		-DPSP_ALLOW_FETCH_SDL=OFF \
+		-DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+		-DCMAKE_INSTALL_BINDIR=games
