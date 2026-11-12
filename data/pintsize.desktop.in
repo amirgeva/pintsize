@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Pint-Size Prix
+GenericName=Miniature Racing Game
+Comment=Race thumb-sized vehicles across tables, benches and sandboxes
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/pintsize
+Icon=pintsize
+Terminal=false
+Categories=Game;ArcadeGame;
+Keywords=racing;cars;arcade;multiplayer;micro;
+StartupNotify=false
+SingleMainWindow=true

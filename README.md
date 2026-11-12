@@ -76,6 +76,18 @@ cmake --build build -j
 ./build/pintsize
 ```
 
+### Debian package
+
+`scripts/build-deb.sh` builds the game and packages it as a Debian source package (`.dsc`, `.orig.tar.gz`, `.debian.tar.xz`) and a binary `.deb`, using the packaging in `debian/`:
+
+```sh
+scripts/build-deb.sh --install-deps   # first time: installs debhelper etc. with sudo
+scripts/build-deb.sh                  # results go to build/deb/
+sudo apt install ./build/deb/pintsize_*_amd64.deb
+```
+
+Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
+
 ## How to play
 
 ### Controls
