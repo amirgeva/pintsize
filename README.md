@@ -36,7 +36,7 @@ The game is built for the keyboard, including two players sharing one. All artwo
 - CMake 3.16 or newer
 - A C++17 compiler
 - SDL2, which can come from vcpkg or a system package, or be downloaded automatically by CMake
-- ENet 1.3.18 for LAN play, which CMake downloads and compiles automatically (or takes from vcpkg if the `enet` port is installed)
+- ENet 1.3.18 for LAN play. CMake downloads and compiles it during the first configure, so that step needs an internet connection. It uses vcpkg's `enet` port instead if one is installed
 
 The game is developed and tested on Windows. The Linux build (game, bot and tests) has been built and tested on Ubuntu 24.04 under WSL, including LAN races against a Windows machine. macOS has not been tested.
 
@@ -169,51 +169,146 @@ Other rules worth knowing:
 
 ## LAN play
 
-Up to four machines race each other on the local network. Each one drives its own car, and the host can add computer cars. It works best on a wired network; the game copes with lag and lost packets, but you can feel them.
+Up to four machines can race each other on a local network, Windows and Linux mixed. Each player drives from their own machine and keyboard, and the host can fill the grid with computer cars. LAN races are circuit races over the course's usual number of laps. Head-to-head is not available over the network yet.
 
-### Hosting and joining
+### Before you start
 
-Choose **LAN RACE** in the main menu, then:
+- **Same version everywhere.** Build every machine from the same commit. Machines with different versions refuse to race each other.
+- **One player per machine.** The game reads the keyboard only in the focused window, so two game windows on one PC cannot both be driven. For two people, use two machines.
+- **The game or the bot.** A machine with a player runs the game, `pintsize`, which needs SDL2 and a display. A machine that only supplies a computer opponent can run `psp_bot`, which needs neither. See [Building](#building), and `-DPSP_BUILD_GAME=OFF` for a bot-only build.
+- **Network.** Everyone must be on the same network. A wired connection gives the smoothest race.
+- **Firewall.** The host receives UDP on ports 47474 (the race) and 47475 (LAN search).
+  - Windows asks the first time you host; choose **Allow**.
+  - If your network is set to *Public*, allow public networks too, or switch the network to *Private*.
+  - On Linux with ufw, run `sudo ufw allow 47474:47475/udp`.
+- **The host's address.** You need it only if the search does not find the host.
+  - On Windows, run `ipconfig` and read *IPv4 Address* under the adapter on your network.
+  - On Linux, run `hostname -I`.
 
-- **HOST A RACE** opens a lobby. Left and Right choose the course, Up and Down set how many computer cars join, and Enter starts the race once the others are in.
-- **JOIN A RACE** lists the hosts it finds on the network. Pick one with Enter. The host chooses everything else.
+### Two players on two machines
 
-The host must allow incoming UDP on ports 47474 (game) and 47475 (search). Windows asks the first time you host; answer **Allow** for private networks. If the search finds nothing, for example across subnets or from inside a virtual machine, join by address instead:
+1. **Host.** On one machine, choose **LAN RACE** from the main menu, then **HOST A RACE**. The lobby opens, showing the players who have joined.
+2. **Join.** On the other machine, choose **LAN RACE**, then **JOIN A RACE**. Pick the host from the list and press Enter. If the list stays empty, start the game with the host's address instead:
 
-```powershell
-.\build\Release\pintsize.exe --join 192.168.1.20       # or --join 192.168.1.20:47474
-.\build\Release\pintsize.exe --host                    # straight to a hosted lobby
-```
+   ```sh
+   ./build/pintsize --join 192.168.1.20                  # Linux
+   .\build\Release\pintsize.exe --join 192.168.1.20      # Windows
+   ```
 
-During a LAN race, Esc offers a way out, but the race carries on without you while the menu is up. If someone leaves mid-race, the host's computer takes over their car. If the host leaves, the race ends for everyone.
+3. **Set up the race (host only).** In the lobby:
+   - Left and Right choose the course.
+   - Up and Down set how many computer cars join; use 0 for a one-on-one.
+   - Enter starts the race.
+4. **Race.** Everyone sees the countdown at the same moment. Steer with the usual keys; either set works, as when playing alone.
+5. **After the race.** Everyone gets the same result screen. Enter goes back to the lobby, where the host can pick another course and start again. Esc leaves.
 
-### The headless bot
+A player can join while a race is running. They wait in the lobby and take part in the next race.
 
-`psp_bot` is a computer driver with no window or sound. It joins or hosts races like the game, and prints what happens:
+Your name in the lobby is your computer's name. Your car uses the driver you last picked in Tournament or Time Trial. If someone has already taken that driver, you get the next free one.
 
-```sh
-psp_bot --join 192.168.1.20                      # join a host
-psp_bot --join                                   # search the LAN and join the first host found
-psp_bot --host --players 2 --cpu 2               # host; start when one more machine joins, add 2 computer cars
-psp_bot --host --track cycle --laps 1 --races 6  # one lap of every course, then stop
-```
+### Playing against the bot
 
-Other options: `--name`, `--skill 0.5..1.1`, `--color 0..5`, `--port`, `--bind ADDRESS` (host on one interface only, such as 127.0.0.1), `--stats SECONDS` and `--quiet`. Run `psp_bot --help` for the full list.
+`psp_bot` is a computer driver that takes part like another machine. It has no window and prints the lobby, its lap times, the results and network statistics to its terminal.
 
-To race the bot yourself, host from the game and run `psp_bot --join` on any machine, or the other way round.
+- **Your game hosts.** Host from the game, then start the bot. It can run on the same PC or on any other machine on the network:
+
+  ```sh
+  psp_bot --join 127.0.0.1         # on the same PC
+  psp_bot --join 192.168.1.20      # from another machine, by the host's address
+  psp_bot --join                   # search the network and join the first host found
+  ```
+
+  The bot is `./build/psp_bot` on Linux and `.\build\Release\psp_bot.exe` on Windows. It waits in your lobby until you press Enter.
+
+- **The bot hosts.** Start the bot first, then join from the game:
+
+  ```sh
+  psp_bot --host --players 2 --cpu 2
+  ```
+
+  It starts a race 3 seconds after you join, and another about 7 seconds after each race ends, until you leave.
+
+| Bot option             | Meaning                                                                 |
+|------------------------|-------------------------------------------------------------------------|
+| `--join [ADDRESS[:PORT]]` | Join a host. With no address, search the network                    |
+| `--host`               | Host races                                                              |
+| `--players N`          | Host: start once N machines, the bot included, are in (default 2)       |
+| `--cpu N`              | Host: computer cars to add (default 0)                                  |
+| `--track N` or `cycle` | Host: course 0 to 5, or each course in turn (default 0)                 |
+| `--laps N`             | Host: laps per race (default: the course's own number)                  |
+| `--races N`            | Host: stop after N races                                                |
+| `--bind ADDRESS`       | Host: listen on one interface only, such as `127.0.0.1`                 |
+| `--skill X`            | Driving speed, 0.5 to 1.1 (default 1.0)                                 |
+| `--name NAME`, `--color 0..5` | Name in the lobby and preferred driver                           |
+| `--lag`, `--jitter`, `--loss` | Simulate a poor connection, as below                             |
+| `--stats SECONDS`, `--quiet` | How often to print network statistics (0 for never), or print only connections and results |
+
+### During a LAN race
+
+| Key                  | Action                                                                                  |
+|----------------------|-----------------------------------------------------------------------------------------|
+| Driving keys         | As usual; either set works                                                              |
+| Esc                  | Opens a menu: **BACK TO THE RACE** or **LEAVE THE RACE**. The race does not pause, and your car lets go of the controls while the menu is open |
+| F9                   | Cycle the simulated connection (see below)                                              |
+| F10                  | Show network statistics                                                                 |
+
+If a player leaves mid-race, the host's computer takes over their car and finishes the race with it. If the host leaves, the race ends for everyone with **THE HOST LEFT**.
 
 ### Simulating a poor connection
 
-Both the game and the bot can delay and drop their own traffic, in both directions, to show how the game feels on a bad network:
+To feel how the game copes with a bad network, any machine can add delay and packet loss to its own traffic, in both directions. Setting it on one machine is enough.
+
+In the game, press **F9** to step through these presets, on any screen:
+
+| Preset | Delay each way | Jitter | Loss |
+|--------|----------------|--------|------|
+| 1      | none           | none   | none |
+| 2      | 20 ms          | ±5 ms  | 1%   |
+| 3      | 50 ms          | ±15 ms | 3%   |
+| 4      | 100 ms         | ±30 ms | 5%   |
+| 5      | 200 ms         | ±60 ms | 10%  |
+
+The active setting is shown in red in the lobby and during the race. You can also choose exact values on the command line, for the game or the bot:
 
 ```sh
 pintsize --join 192.168.1.20 --lag 80 --jitter 30 --loss 5
 psp_bot --host --lag 100 --jitter 40 --loss 10
 ```
 
-`--lag` is the delay added each way in milliseconds, and `--jitter` varies it at random by up to that much either side. As in a real network queue, packets keep their order: a delayed packet holds up the ones behind it, so they arrive bunched together. `--loss` is the chance each packet is lost. Lost car states simply vanish. Reliable messages arrive late instead, as they would after ENet resent them. In the game, F9 cycles through presets from none to 200 ms ±60 with 10% loss, and F10 shows the round trip, clock accuracy, and states received and lost per second.
+- **`--lag`** is the delay added each way, in milliseconds.
+- **`--jitter`** varies that delay at random by up to this much either side. Packets keep their order, as in a real network queue, so a delayed packet holds up the ones behind it and they arrive bunched together.
+- **`--loss`** is the chance, in percent, that each packet is lost. A lost car state simply vanishes. Other messages, such as bumps and results, arrive late instead, as after a resend.
 
-### How it works
+**F10** shows what the connection is doing:
+
+| Line           | Meaning                                                                                |
+|----------------|----------------------------------------------------------------------------------------|
+| ROUND TRIP     | Time for a message to reach the host and come back. On the host, the slowest client's  |
+| CLOCK WITHIN   | How far this machine's copy of the shared race clock can be off. Always 0 on the host  |
+| STATES / LOST  | Car states received and lost per second. Each other machine sends 60 a second          |
+| AGE            | How old car states are when they arrive                                                |
+
+### Game command-line options
+
+| Option                    | Meaning                                               |
+|---------------------------|-------------------------------------------------------|
+| `--host`                  | Open a hosted lobby straight away                     |
+| `--join ADDRESS[:PORT]`   | Join that host straight away. The port defaults to 47474 |
+| `--lag MS`, `--jitter MS`, `--loss PERCENT` | Start with a simulated poor connection |
+
+### Troubleshooting
+
+| Problem | What to do |
+|---------|------------|
+| **JOIN A RACE** finds nothing | Check the host's firewall and network profile, as above. Search does not cross routers, VPNs or virtual machine networks, and extra network adapters (VirtualBox, Hyper-V, WSL, ZeroTier) can carry the search away from your LAN. Join by address with `--join`. |
+| COULD NOT REACH THE HOST | Check the address, that the host is in its lobby, and that its firewall lets UDP 47474 in. |
+| DIFFERENT GAME VERSIONS, or THIS COURSE DIFFERS FROM THE HOST'S | Build every machine from the same commit. |
+| THE RACE IS FULL | A race takes four machines at most. |
+| TOOK TOO LONG TO START | A machine needed more than 15 seconds to prepare the course, and the race started without it. |
+| The other cars jump around | Press F10. A high LOST rate or AGE means a poor connection; try a cable instead of Wi-Fi. Check that F9 is not simulating lag. |
+| Racing against WSL on the same PC | WSL is behind its own network address translation, so search does not reach it. From Windows, join the address shown by `ip -4 addr show eth0` in WSL. From WSL, join the Windows address shown by `ip route` (after `via`). |
+
+### How LAN play works
 
 Every machine runs its own *race module*: a `Race` that drives the cars belonging to that machine and shows everyone else's from what they send. Single player is one module that drives every car.
 
