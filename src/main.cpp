@@ -11,7 +11,7 @@
 // map:N saves the whole world for track N rather than a game frame.
 static int runShot(int argc, char** argv) {
     if (argc < 4) return 2;
-    SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);  // works on SDL < 2.0.22, which lacks SDL_HINT_VIDEODRIVER
     SDL_Init(SDL_INIT_VIDEO);
 
     if (std::strncmp(argv[3], "map:", 4) == 0) {
@@ -55,7 +55,7 @@ static int runShot(int argc, char** argv) {
 // Like --shot, but saves a sequence <dir>/f0000.bmp... for building gameplay clips.
 static int runRecord(int argc, char** argv) {
     if (argc < 7) return 2;
-    SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);  // works on SDL < 2.0.22, which lacks SDL_HINT_VIDEODRIVER
     SDL_Init(SDL_INIT_VIDEO);
     SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, VIEW_W, VIEW_H, 32, SDL_PIXELFORMAT_ARGB8888);
     SDL_Renderer* renderer = SDL_CreateSoftwareRenderer(surface);
