@@ -1,0 +1,3 @@
+// Windows resources for pintsize.exe. Explorer shows the first icon, and SDL uses it for the
+// window's title bar and taskbar button. Regenerate the icon with tools/make_icon.py.
+IDI_APPICON ICON "pintsize.ico"
