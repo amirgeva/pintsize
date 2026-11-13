@@ -52,6 +52,9 @@ add_library(psp_core STATIC src/track.cpp src/tracks.cpp src/props.cpp src/race.
 target_include_directories(psp_core PUBLIC src)
 
 add_executable(pintsize WIN32 src/main.cpp src/game.cpp src/gfx.cpp src/audio.cpp)
+if(WIN32)
+  target_sources(pintsize PRIVATE res/pintsize.rc)  # the program icon
+endif()
 target_link_libraries(pintsize PRIVATE psp_core)
 if(TARGET SDL2::SDL2main)
   target_link_libraries(pintsize PRIVATE SDL2::SDL2main)

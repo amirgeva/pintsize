@@ -183,6 +183,11 @@ src/
   main.cpp         Window, fixed-timestep loop and the --shot debug tool
 tests/
   simtest.cpp      Headless test of every course and game mode
+res/
+  pintsize.rc      Windows resources: the program icon
+  pintsize.ico     The icon, Dot's red coupe in every size Windows asks for
+tools/
+  make_icon.py     Draws pintsize.ico from the in-game car sprite (needs Pillow)
 ```
 
 The code is split into two layers. `psp_core` (`track`, `tracks`, `props`, `race`) contains the rules and world generation and has no SDL dependency, which is what lets the test program run without a display. The `pintsize` executable adds rendering, sound and input on top.
