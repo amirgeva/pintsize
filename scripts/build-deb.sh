@@ -73,9 +73,10 @@ timestamp=$(dpkg-parsechangelog -S Timestamp)
 orig="$out/${source}_${upstream}.orig.tar.gz"
 srcdir="$out/${source}-${upstream}"
 
-cmake_version=$(sed -n 's/^project([^ ]* VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-if [ -n "$cmake_version" ] && [ "$cmake_version" != "$upstream" ]; then
-    die "debian/changelog says $upstream but CMakeLists.txt says $cmake_version"
+# VERSION holds the version; scripts/set-version.py copies it into debian/changelog.
+file_version=$(head -n 1 VERSION 2>/dev/null | tr -d '\r')
+if [ "$file_version" != "$upstream" ]; then
+    die "debian/changelog says $upstream but VERSION says ${file_version:-nothing} (run scripts/set-version.py --sync)"
 fi
 
 info "packaging $source $version"

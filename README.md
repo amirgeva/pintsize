@@ -88,6 +88,17 @@ sudo apt install ./build/deb/pintsize_*_amd64.deb
 
 Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
 
+### Version number
+
+The version is written only in `VERSION`, which CMake reads. The packaging files that need their own copy (`vcpkg.json`, `debian/changelog`, the AppStream metainfo and the man page) are kept in step by a script:
+
+```sh
+python3 scripts/set-version.py 0.1.2 "What changed, in one line."   # bump everything
+python3 scripts/set-version.py --check                              # list files that disagree
+```
+
+The note becomes the new `debian/changelog` entry and the metainfo release description. `build-deb.sh` stops if `debian/changelog` and `VERSION` disagree.
+
 ## How to play
 
 ### Controls
@@ -168,6 +179,7 @@ Other rules worth knowing:
 
 ```
 CMakeLists.txt     Build definition
+VERSION            The version number, the only place it is written
 vcpkg.json         vcpkg manifest (SDL2)
 src/
   common.h         Vec2, angle helpers, the Surface enum, view size and tick rate
@@ -188,6 +200,11 @@ res/
   pintsize.ico     The icon, Dot's red coupe in every size Windows asks for
 tools/
   make_icon.py     Draws pintsize.ico from the in-game car sprite (needs Pillow)
+scripts/
+  set-version.py   Sets the version: writes VERSION and copies it to the files below
+  build-deb.sh     Builds the Debian packages
+debian/            Debian packaging
+data/              Linux desktop entry, AppStream metainfo, icon and man page
 ```
 
 The code is split into two layers. `psp_core` (`track`, `tracks`, `props`, `race`) contains the rules and world generation and has no SDL dependency, which is what lets the test program run without a display. The `pintsize` executable adds rendering, sound and input on top.

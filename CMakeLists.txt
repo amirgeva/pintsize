@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(PintSizePrix VERSION 0.1.0
+# The version is written only in VERSION; scripts/set-version.py copies it to the other files.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PSP_VERSION LIMIT_COUNT 1)
+project(PintSizePrix VERSION ${PSP_VERSION}
         DESCRIPTION "Top-down miniature racing game"
         HOMEPAGE_URL "https://github.com/amirgeva/pintsize"
         LANGUAGES C CXX)
