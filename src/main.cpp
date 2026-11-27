@@ -119,6 +119,26 @@ int main(int argc, char** argv) {
     audio.init();  // the game still runs if no sound device is available
     {
         Game game(renderer, &audio);
+
+        // LAN play from the command line:
+        //   --host | --join ADDRESS[:PORT]          go straight to the lobby
+        //   --lag MS --jitter MS --loss PERCENT     simulate a poor connection (F9 cycles presets in game)
+        NetConditions sim;
+        std::string join;
+        bool host = false;
+        for (int i = 1; i < argc; ++i) {
+            const std::string a = argv[i];
+            const bool more = i + 1 < argc;
+            if (a == "--host") host = true;
+            else if (a == "--join" && more) join = argv[++i];
+            else if (a == "--lag" && more) sim.lagMs = (float)std::atof(argv[++i]);
+            else if (a == "--jitter" && more) sim.jitterMs = (float)std::atof(argv[++i]);
+            else if (a == "--loss" && more) sim.lossPercent = (float)std::atof(argv[++i]);
+        }
+        game.setNetConditions(sim);
+        if (host) game.startLanHost();
+        else if (!join.empty()) game.startLanJoin(join);
+
         const double tickSeconds = DT;
         const double freq = (double)SDL_GetPerformanceFrequency();
         Uint64 last = SDL_GetPerformanceCounter();
@@ -147,6 +167,7 @@ int main(int argc, char** argv) {
                 game.tick();
                 accumulator -= tickSeconds;
             }
+            game.frame();
 
             SDL_SetRenderTarget(renderer, frame);
             game.draw();

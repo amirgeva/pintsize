@@ -35,6 +35,11 @@ constexpr float RESPAWN_CLEARANCE = 5.0f;  // margin around a respawning car (px
 constexpr float WEDGED_TIME = 0.8f;        // a car stuck in an object this long is rescued (s)
 constexpr float MAX_AIR_GAP = 8.0f;        // cars further apart in height than this pass over each other
 
+// Network play
+constexpr int CONTACT_WINDOW = 6;          // ticks within which two reports of one pair's bump are the same bump
+constexpr float MAX_COAST = 0.4f;          // a remote car with no news for this long stops being extrapolated (s)
+constexpr float MAX_TURN_RATE = 20.0f;     // rad/s; caps extrapolated spin, e.g. after a respawn resets the heading
+
 constexpr int PROGRESS_WINDOW = 40;
 constexpr float STRAY_MARGIN = Track::APRON + 8.0f;
 constexpr float OFFSCREEN_MARGIN = 14.0f;
@@ -130,21 +135,28 @@ float carOverlapDepth(const Car& a, const Car& b) {
 
 Race::Race(const Track& track, const RaceConfig& cfg) : track_(track), cfg_(cfg), rng_(cfg.seed) {
     const VehicleSpec& spec = vehicleSpec(track.def().vehicle);
-    cars_.resize(cfg.numCars);
+    cfg_.numCars = std::max(1, std::min(cfg_.numCars, MAX_CARS));
+    cars_.resize(cfg_.numCars);
+    for (auto& row : lastContact_)
+        for (int& t : row) t = -1000;
     const float hw = track.halfWidth();
-    for (int i = 0; i < cfg.numCars; ++i) {
+    int localHumans = 0;
+    for (int i = 0; i < cfg_.numCars; ++i) {
         Car& c = cars_[i];
         c.id = i;
         c.human = i < cfg.humans;
-        c.humanIndex = c.human ? i : -1;
+        c.driver = cfg.driver[i];
+        c.remote = c.driver != cfg.self;
+        c.humanIndex = c.human && !c.remote ? localHumans++ : -1;
+        networked_ = networked_ || c.remote;
         c.color = cfg.colors[i];
         c.spec = &spec;
         c.aiBias = (float)((i % 3) - 1) * 8.0f;
 
         // Two-by-two grid behind the start line, with the humans at the back in a circuit race.
-        int slot = cfg.mode == RaceMode::Circuit ? cfg.numCars - 1 - i : i;
+        int slot = cfg_.mode == RaceMode::Circuit ? cfg_.numCars - 1 - i : i;
         int back = 8 + (slot / 2) * 12 + (slot % 2) * 5;
-        float lateral = cfg.numCars == 1 ? 0.0f : ((slot % 2) ? hw * 0.42f : -hw * 0.42f);
+        float lateral = cfg_.numCars == 1 ? 0.0f : ((slot % 2) ? hw * 0.42f : -hw * 0.42f);
         int idx = track.wrap(-back);
         c.idx = idx;
         placeCar(c, idx, lateral);
@@ -152,6 +164,13 @@ Race::Race(const Track& track, const RaceConfig& cfg) : track_(track), cfg_(cfg)
         c.progress = -back * Track::STEP;
         c.lapsDone = -1;
     }
+
+    // The camera follows this machine's player, or failing that the first car driven here.
+    focus_ = -1;
+    for (const Car& c : cars_) if (focus_ < 0 && c.human && !c.remote) focus_ = c.id;
+    for (const Car& c : cars_) if (focus_ < 0 && !c.remote) focus_ = c.id;
+    if (focus_ < 0) focus_ = 0;
+
     buildSpeedProfile();
     updateCamera(true);
 }
@@ -205,7 +224,15 @@ void Race::buildSpeedProfile() {
 
 void Race::step(const Input inputs[2]) {
     events_.clear();
+    events_.insert(events_.end(), pendingEvents_.begin(), pendingEvents_.end());
+    pendingEvents_.clear();
+    out_.clear();
+    ++tick_;
+    advance(inputs);
+    if (networked_) collectNews();
+}
 
+void Race::advance(const Input inputs[2]) {
     if (phase_ == Phase::Countdown) {
         timer_ -= DT;
         int light = (int)std::ceil(timer_ / (COUNTDOWN_TIME / 4.0f));
@@ -233,20 +260,47 @@ void Race::step(const Input inputs[2]) {
 
     updateRubberBand();
     for (Car& c : cars_) {
+        if (c.remote) {
+            // Driven elsewhere: carry on from its last known state until the next one arrives.
+            c.sinceUpdate += DT;
+            if (c.sinceUpdate <= MAX_COAST) coast(c, DT);
+            continue;
+        }
         Input in;
         bool humanDriving = c.human && !c.finished && phase_ == Phase::Running;
         in = humanDriving ? inputs[c.humanIndex] : aiInput(c);
+        const float before = c.heading;
         stepCar(c, in);
+        c.turnRate = clampf((c.heading - before) / DT, -MAX_TURN_RATE, MAX_TURN_RATE);
     }
     collideCars();
     stepShells();
 
     if (cfg_.mode == RaceMode::HeadToHead) {
         if (phase_ == Phase::Running) updateHeadToHead();
-    } else if (phase_ == Phase::Running) {
-        checkRaceEnd();
+    } else if (referee()) {
+        assignPlaces();
+        if (phase_ == Phase::Running) checkRaceEnd();
     }
     updateCamera(false);
+}
+
+// Moves a remote car on as if nothing changes: straight-line motion, steady turning, ballistic jumps.
+void Race::coast(Car& c, float t) {
+    c.pos += c.vel * t;
+    if (c.state == CarState::Drive) c.heading += c.turnRate * t;
+    if (c.z > 0 || c.vz != 0) {
+        c.z += c.vz * t - 0.5f * GRAVITY * t * t;
+        c.vz -= GRAVITY * t;
+        if (c.z <= 0) { c.z = 0; c.vz = 0; }
+    }
+    if (t > 0) {
+        c.invuln = std::max(0.0f, c.invuln - t);
+        c.spin = std::max(0.0f, c.spin - t);
+        c.knock = std::max(0.0f, c.knock - t);
+        c.bumpSound = std::max(0.0f, c.bumpSound - t);
+        if (c.state == CarState::Fall) c.fallTimer = std::max(0.0f, c.fallTimer - t);
+    }
 }
 
 void Race::stepCar(Car& c, const Input& inRaw) {
@@ -353,7 +407,9 @@ void Race::stepCar(Car& c, const Input& inRaw) {
     if (in.fire && v.hasGun && c.gunCooldown <= 0) {
         c.gunCooldown = 0.8f;
         Vec2 dir = fromAngle(h);
-        shells_.push_back({c.pos + dir * (v.radius + 8), dir * 380.0f + c.vel * 0.3f, 1.2f, c.id});
+        Shell s{c.pos + dir * (v.radius + 8), dir * 380.0f + c.vel * 0.3f, 1.2f, c.id, (c.id << 24) | (shellSeq_++ & 0xFFFFFF)};
+        shells_.push_back(s);
+        if (networked_) out_.shots.push_back({s.id, s.owner, s.pos, s.vel, s.life});
         emit(EventType::Shot, c.pos, c.id);
     }
 }
@@ -485,9 +541,8 @@ void Race::updateProgress(Car& c) {
         c.lapTime = 0;
         if (c.human && laps < cfg_.laps) emit(EventType::Lap, c.pos, c.id);
         if (cfg_.mode != RaceMode::HeadToHead && laps >= cfg_.laps && !c.finished) {
-            c.finished = true;
+            c.finished = true;   // the referee gives it a place (assignPlaces)
             c.finishTime = clock_;
-            c.place = nextPlace_++;
             emit(EventType::Lap, c.pos, c.id, 2.0f);
         }
     }
@@ -495,13 +550,26 @@ void Race::updateProgress(Car& c) {
 
 void Race::collideCars() {
     const int count = (int)cars_.size();
-    bool bounced[4][4] = {};   // separating can take several passes, but each pair bounces once a tick
+
+    // Cars driven by this module are solved together. A car driven by another module takes part
+    // through a scratch copy: the push and bounce it would get are worked out but thrown away here,
+    // because its own module does the same for it when it sees the contact. A bounce is also sent
+    // as a contact, so the other module never misses its half because it saw the cars a tick apart.
+    Car scratch[MAX_CARS];
+    Car* view[MAX_CARS];
+    for (int i = 0; i < count; ++i) {
+        if (cars_[i].remote) { scratch[i] = cars_[i]; view[i] = &scratch[i]; }
+        else view[i] = &cars_[i];
+    }
+
+    bool bounced[MAX_CARS][MAX_CARS] = {};   // separating can take several passes, but each pair bounces once a tick
     for (int pass = 0; pass < SOLVER_PASSES; ++pass) {
         bool anyOverlap = false;
         for (int i = 0; i < count; ++i) {
             for (int j = i + 1; j < count; ++j) {
-                Car& a = cars_[i];
-                Car& b = cars_[j];
+                if (cars_[i].remote && cars_[j].remote) continue;   // their modules handle it
+                Car& a = *view[i];
+                Car& b = *view[j];
                 if (a.state != CarState::Drive || b.state != CarState::Drive) continue;
                 if (std::abs(a.z - b.z) > MAX_AIR_GAP) continue;
                 Vec2 n;
@@ -509,10 +577,20 @@ void Race::collideCars() {
                 if (!boxesOverlap(carBox(a), carBox(b), n, depth)) continue;
                 anyOverlap = true;
                 separateCars(a, b, n, depth);
-                if (!bounced[i][j]) {
-                    bounced[i][j] = true;
-                    bounceCars(a, b, n);
-                }
+                if (bounced[i][j]) continue;
+                bounced[i][j] = true;
+
+                if (!cars_[i].remote && !cars_[j].remote) { bounceCars(a, b, n); continue; }
+                if ((int)tick_ - lastContact_[i][j] <= CONTACT_WINDOW) continue;   // already bounced, here or there
+                Car& other = cars_[i].remote ? a : b;
+                const Car& mine = cars_[i].remote ? b : a;
+                const Vec2 vel0 = other.vel;
+                const float yaw0 = other.yawKick;
+                const float closing = dot(a.vel - b.vel, n);
+                if (!bounceCars(a, b, n)) continue;
+                lastContact_[i][j] = (int)tick_;
+                out_.contacts.push_back({mine.id, other.id, other.vel - vel0, other.knock, other.yawKick - yaw0,
+                                         (a.pos + b.pos) * 0.5f, closing / 200.0f});
             }
         }
         if (!anyOverlap) break;
@@ -534,9 +612,9 @@ void Race::separateCars(Car& a, Car& b, Vec2 n, float depth) {
     b.pos += moveB;
 }
 
-void Race::bounceCars(Car& a, Car& b, Vec2 n) {
+bool Race::bounceCars(Car& a, Car& b, Vec2 n) {
     const float closing = dot(a.vel - b.vel, n);
-    if (closing <= 0) return;   // already moving apart
+    if (closing <= 0) return false;   // already moving apart
 
     float separation = closing * RESTITUTION_CAR;
     if (closing > MIN_CLOSING) separation = std::max(separation, MIN_CAR_BOUNCE);
@@ -559,8 +637,9 @@ void Race::bounceCars(Car& a, Car& b, Vec2 n) {
 
     if (closing > 20.0f && a.bumpSound <= 0 && b.bumpSound <= 0) {
         a.bumpSound = b.bumpSound = 0.1f;
-        emit(EventType::Bump, contact, a.id, closing / 200.0f);
+        emit(EventType::Bump, contact, a.id, closing / 200.0f, b.id);
     }
+    return true;
 }
 
 void Race::stepShells() {
@@ -571,12 +650,14 @@ void Race::stepShells() {
         bool dead = s.life <= 0 || track_.at(s.pos) == Surface::Wall;
         if (!dead) {
             for (Car& c : cars_) {
-                if (c.id == s.owner || c.state != CarState::Drive || c.invuln > 0 || c.z > 8) continue;
+                // Each module decides whether a shell hits the cars it drives, whoever fired it.
+                if (c.remote || c.id == s.owner || c.state != CarState::Drive || c.invuln > 0 || c.z > 8) continue;
                 if (len2(c.pos - s.pos) < c.spec->radius * c.spec->radius + 16) {
                     c.vel = c.vel * 0.15f + norm(s.vel) * 60.0f;
                     c.spin = SPIN_TIME;
                     c.invuln = SPIN_TIME + 0.5f;   // no chain-stunning a car that was just hit
                     emit(EventType::Hit, c.pos, c.id);
+                    if (networked_) out_.shellsGone.push_back(s.id);
                     dead = true;
                     break;
                 }
@@ -672,23 +753,42 @@ std::vector<int> Race::standings() const {
     std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
         const Car& ca = cars_[a];
         const Car& cb = cars_[b];
+        if (ca.place > 0 && cb.place > 0) return ca.place < cb.place;
         if (ca.finished != cb.finished) return ca.finished;
-        if (ca.finished) return ca.place < cb.place;
+        if (ca.finished) {
+            // A module that is not the referee can see a car finish before its place arrives.
+            if ((ca.place > 0) != (cb.place > 0)) return ca.place > 0;
+            return ca.finishTime < cb.finishTime;
+        }
         return ca.progress > cb.progress;
     });
     return order;
 }
 
+// The referee places finishers in the order of their own finishing times, which matters when
+// another module reports a finish a tick or two after it happened.
+void Race::assignPlaces() {
+    int fresh[MAX_CARS];
+    int n = 0;
+    for (const Car& c : cars_) if (c.finished && c.place == 0) fresh[n++] = c.id;
+    std::sort(fresh, fresh + n, [&](int a, int b) {
+        if (cars_[a].finishTime != cars_[b].finishTime) return cars_[a].finishTime < cars_[b].finishTime;
+        return a < b;
+    });
+    for (int i = 0; i < n; ++i) cars_[fresh[i]].place = nextPlace_++;
+}
+
 void Race::checkRaceEnd() {
-    int finished = 0, humansLeft = 0;
+    int finished = 0, humans = 0, humansLeft = 0;
     for (const Car& c : cars_) {
         finished += c.finished ? 1 : 0;
+        humans += c.human ? 1 : 0;   // counted here, because a car whose player leaves becomes a computer car
         humansLeft += (c.human && !c.finished) ? 1 : 0;
     }
     int total = (int)cars_.size();
     bool done;
-    if (cfg_.humans == 0) done = finished == total;
-    else done = humansLeft == 0 || (total > cfg_.humans && finished >= total - cfg_.humans);
+    if (humans == 0) done = finished == total;
+    else done = humansLeft == 0 || (total > humans && finished >= total - humans);
     if (!done) return;
 
     // Anyone still racing is classified by how far they got.
@@ -701,7 +801,7 @@ void Race::checkRaceEnd() {
 }
 
 void Race::updateCamera(bool snap) {
-    int focus = 0;
+    int focus = focus_;
     if (cfg_.mode == RaceMode::HeadToHead) focus = leader_;
     const Car& c = cars_[focus];
     Vec2 lead = c.vel * 0.34f;
@@ -769,4 +869,169 @@ void Race::resetRound() {
     updateCamera(true);
     phase_ = Phase::Running;
     roundGrace_ = 1.5f;
+}
+
+// ---------------------------------------------------------------- modules
+
+CarSnapshot Race::snapshot(const Car& c) const {
+    CarSnapshot s;
+    s.id = c.id;
+    s.pos = c.pos;
+    s.vel = c.vel;
+    s.heading = c.heading;
+    s.turnRate = c.turnRate;
+    s.z = c.z;
+    s.vz = c.vz;
+    s.state = c.state;
+    s.sinking = c.sinking;
+    s.wasOnRamp = c.wasOnRamp;
+    s.finished = c.finished;
+    s.fallTimer = c.fallTimer;
+    s.invuln = c.invuln;
+    s.spin = c.spin;
+    s.knock = c.knock;
+    s.yawKick = c.yawKick;
+    s.skid = c.skid;
+    s.surface = c.surface;
+    s.idx = c.idx;
+    s.safeIdx = c.safeIdx;
+    s.lapsDone = c.lapsDone;
+    s.progress = c.progress;
+    s.lapTime = c.lapTime;
+    s.bestLap = c.bestLap;
+    s.finishTime = c.finishTime;
+    return s;
+}
+
+void Race::collectNews() {
+    out_.from = cfg_.self;
+    out_.tick = tick_;
+    for (const Car& c : cars_) if (!c.remote) out_.cars.push_back(snapshot(c));
+
+    // Sounds and effects of the cars driven here. A bump with another module's car is left out:
+    // that module plays its own when it sees the bump or gets the contact.
+    for (const RaceEvent& e : events_) {
+        if (e.car < 0 || e.car >= (int)cars_.size() || cars_[e.car].remote) continue;
+        if (e.type == EventType::Bump && (e.other < 0 || e.other >= (int)cars_.size() || cars_[e.other].remote)) continue;
+        out_.events.push_back(e);
+    }
+
+    if (referee()) {
+        bool changed = phase_ == Phase::Finished && !reportedOver_;
+        for (const Car& c : cars_) changed = changed || c.place != reportedPlaces_[c.id];
+        if (changed) {
+            out_.hasResult = true;
+            out_.over = reportedOver_ = phase_ == Phase::Finished;
+            for (const Car& c : cars_) out_.places[c.id] = reportedPlaces_[c.id] = c.place;
+        }
+    }
+}
+
+void Race::apply(const RaceNews& n, float age) {
+    // The state left by this call is moved on one tick by the next step, so extrapolate it to a tick
+    // before now. Very old news is shown where it was and left to go stale.
+    const float ahead = clampf(age - DT, -3 * DT, MAX_COAST);
+    for (const CarSnapshot& s : n.cars) {
+        if (s.id < 0 || s.id >= (int)cars_.size()) continue;
+        if (n.from == snapFrom_[s.id] && n.tick <= snapTick_[s.id]) continue;   // older than what is shown
+        snapFrom_[s.id] = n.from;
+        snapTick_[s.id] = n.tick;
+        applySnapshot(s, ahead);
+        cars_[s.id].sinceUpdate = std::max(0.0f, age - DT);
+    }
+    for (const CarContact& c : n.contacts) applyContact(c);
+    for (const ShellShot& s : n.shots) applyShot(s, ahead);
+    for (int id : n.shellsGone) removeShell(id);
+    for (const RaceEvent& e : n.events) {
+        if (e.car >= 0 && e.car < (int)cars_.size() && cars_[e.car].remote) pendingEvents_.push_back(e);
+    }
+    if (n.hasResult && !referee()) applyResult(n.places, n.over);
+}
+
+void Race::applySnapshot(const CarSnapshot& s, float ahead) {
+    Car& c = cars_[s.id];
+    if (!c.remote) return;   // only this module moves the cars it drives
+    const float check[] = {s.pos.x, s.pos.y, s.vel.x, s.vel.y, s.heading, s.turnRate, s.z, s.vz, s.progress};
+    for (float f : check) if (!std::isfinite(f)) return;
+
+    c.pos = s.pos;
+    c.vel = s.vel;
+    c.heading = s.heading;
+    c.turnRate = clampf(s.turnRate, -MAX_TURN_RATE, MAX_TURN_RATE);
+    c.z = s.z;
+    c.vz = s.vz;
+    c.state = s.state;
+    c.sinking = s.sinking;
+    c.wasOnRamp = s.wasOnRamp;
+    c.finished = c.finished || s.finished;
+    c.fallTimer = s.fallTimer;
+    c.invuln = s.invuln;
+    c.spin = s.spin;
+    c.knock = s.knock;
+    c.yawKick = s.yawKick;
+    c.skid = s.skid;
+    c.surface = s.surface;
+    c.idx = track_.wrap(s.idx);
+    c.safeIdx = track_.wrap(s.safeIdx);
+    c.lapsDone = s.lapsDone;
+    c.progress = s.progress;
+    c.lapTime = s.lapTime;
+    c.bestLap = s.bestLap;
+    c.finishTime = s.finishTime;
+    coast(c, ahead);
+}
+
+void Race::applyContact(const CarContact& ct) {
+    const int count = (int)cars_.size();
+    if (ct.from < 0 || ct.to < 0 || ct.from >= count || ct.to >= count || ct.from == ct.to) return;
+    const int i = std::min(ct.from, ct.to), j = std::max(ct.from, ct.to);
+    if ((int)tick_ - lastContact_[i][j] <= CONTACT_WINDOW) return;   // this module already bounced them
+    lastContact_[i][j] = (int)tick_;
+
+    Car& c = cars_[ct.to];
+    if (!c.remote && std::isfinite(ct.dvel.x) && std::isfinite(ct.dvel.y)) {
+        c.vel += ct.dvel;
+        c.knock = std::max(c.knock, std::min(ct.knock, KNOCK_TIME));
+        c.yawKick = clampf(c.yawKick + ct.yaw, -YAW_MAX, YAW_MAX);
+        limitSpeed(c);
+    }
+    if (ct.strength > 0.1f) pendingEvents_.push_back({EventType::Bump, ct.pos, ct.to, ct.strength, ct.from});
+}
+
+void Race::applyShot(const ShellShot& s, float ahead) {
+    if (s.owner < 0 || s.owner >= (int)cars_.size() || !cars_[s.owner].remote) return;
+    for (const Shell& x : shells_) if (x.id == s.id) return;
+    Shell shell{s.pos + s.vel * ahead, s.vel, s.life - ahead, s.owner, s.id};
+    if (shell.life > 0) shells_.push_back(shell);
+}
+
+void Race::removeShell(int id) {
+    for (size_t i = 0; i < shells_.size(); ++i) {
+        if (shells_[i].id != id) continue;
+        shells_[i] = shells_.back();
+        shells_.pop_back();
+        return;
+    }
+}
+
+void Race::applyResult(const int places[MAX_CARS], bool over) {
+    for (Car& c : cars_) {
+        if (places[c.id] > 0) c.place = places[c.id];
+        if (over && c.human && !c.remote) c.finished = true;   // the race is over: stop taking keys
+    }
+    if (over && phase_ != Phase::Finished) {
+        phase_ = Phase::Finished;
+        sinceFinished_ = 0;
+    }
+}
+
+void Race::takeOver(int car) {
+    if (car < 0 || car >= (int)cars_.size() || !cars_[car].remote) return;
+    Car& c = cars_[car];
+    c.remote = false;
+    c.driver = cfg_.self;
+    cfg_.driver[car] = cfg_.self;
+    c.human = false;
+    c.humanIndex = -1;
+    c.aiStuck = c.aiReverse = 0;
 }

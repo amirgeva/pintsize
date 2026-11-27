@@ -3,8 +3,6 @@
 #include <SDL.h>
 #include <vector>
 
-constexpr int NUM_DRIVERS = 6;
-const char* driverName(int i);
 SDL_Color driverColor(int i);
 
 class Gfx {

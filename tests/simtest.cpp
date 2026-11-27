@@ -1,4 +1,5 @@
 // Headless check that computer drivers can complete every track and that the game modes terminate.
+#include "link.h"
 #include "race.h"
 #include <algorithm>
 #include <cstdio>
@@ -320,6 +321,129 @@ static int runWallBounce(const Track& track) {
     return 0;
 }
 
+// ---------------------------------------------------------------- modules
+
+// Splits a race between two modules joined by a simulated link, the way two machines share one:
+// module 0 (the host) drives cars 0, 2 and 3, and module 1 drives car 1.
+struct ModulePair {
+    Race a, b;
+    LocalLink link;
+
+    static RaceConfig config(int self, int humans, int numCars, int laps) {
+        RaceConfig cfg;
+        cfg.humans = humans;
+        cfg.numCars = numCars;
+        cfg.laps = laps;
+        cfg.driver[1] = 1;
+        cfg.self = self;
+        return cfg;
+    }
+    ModulePair(const Track& track, int humans, int numCars, int laps, int delay, float loss)
+        : a(track, config(0, humans, numCars, laps)), b(track, config(1, humans, numCars, laps)), link(delay, loss) {
+        link.add(a);
+        link.add(b);
+    }
+    void step(const Input inA[2], const Input inB[2]) {
+        a.step(inA);
+        b.step(inB);
+        link.exchange();
+    }
+    const Car& own(int car) const { return car == 1 ? b.cars()[car] : a.cars()[car]; }       // where its module has it
+    const Car& seen(int car) const { return car == 1 ? a.cars()[car] : b.cars()[car]; }      // where the other module shows it
+};
+
+static float percentile(std::vector<float> v, float p) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, (size_t)(p * (v.size() - 1)))];
+}
+
+// A whole race across the link. Both modules must agree on the result, and each must show the
+// other's car close to where that car really is.
+static int runModuleRace(const TrackDef& def, const Track& track, int delay, float loss) {
+    ModulePair m(track, 0, 4, def.laps, delay, loss);
+    Input none[2];
+    int ticks = 0;
+    const int limit = 60 * 60 * 6;
+    std::vector<float> errors;
+    float deepestA = 0, deepestB = 0, deepestTrue = 0;
+    int contacts = 0, hits = 0;
+    while ((m.a.phase() != Phase::Finished || m.b.phase() != Phase::Finished) && ticks < limit) {
+        m.step(none, none);
+        ++ticks;
+        contacts += (int)(m.a.news().contacts.size() + m.b.news().contacts.size());
+        for (const Race* r : {&m.a, &m.b})
+            for (const RaceEvent& e : r->events()) hits += e.type == EventType::Hit ? 1 : 0;
+        if (m.a.phase() != Phase::Running) continue;
+        for (int car = 0; car < 4; ++car) {
+            const Car& own = m.own(car);
+            const Car& seen = m.seen(car);
+            if (own.state == CarState::Drive && seen.state == CarState::Drive) errors.push_back(len(own.pos - seen.pos));
+        }
+        deepestA = std::max(deepestA, worstOverlap(m.a));
+        deepestB = std::max(deepestB, worstOverlap(m.b));
+        // The overlap between the cars as their own modules have them, which is what both screens converge on.
+        for (int i = 0; i < 4; ++i)
+            for (int j = i + 1; j < 4; ++j) {
+                const Car& ci = m.own(i);
+                const Car& cj = m.own(j);
+                if (ci.state == CarState::Drive && cj.state == CarState::Drive && std::abs(ci.z - cj.z) <= 8.0f)
+                    deepestTrue = std::max(deepestTrue, carOverlapDepth(ci, cj));
+            }
+    }
+
+    int failures = 0;
+    const bool done = m.a.phase() == Phase::Finished && m.b.phase() == Phase::Finished;
+    const bool agree = m.a.standings() == m.b.standings();
+    for (const Car& c : m.a.cars()) failures += c.finished ? 0 : 1;
+    const float p99 = percentile(errors, 0.99f);
+    // Within a few pixels almost always; the rest is respawns and collisions, which jump.
+    const bool close = p99 <= 4.0f;
+    // Each module sees the other's car late, so two cars closing at a typical 150 px/s can sink
+    // about 2.5 px further into each other for every tick of delay before both have reacted.
+    const bool apart = deepestTrue <= 1.5f + 2.5f * delay;
+    if (!done || !agree || !close || !apart) ++failures;
+    printf("  modules, %d tick delay, %.0f%% states lost: %s, results %s, position error median %.2f / 99%% %.2f / max %.0f px, "
+           "overlap seen %.1f/%.1f real %.1f px, %d contacts, %d shell hits%s\n",
+           delay, loss * 100, done ? "finished" : "DID NOT FINISH", agree ? "agree" : "DIFFER", percentile(errors, 0.5f), p99,
+           percentile(errors, 1.0f), deepestA, deepestB, deepestTrue, contacts, hits, failures ? "  WRONG" : "");
+    return failures;
+}
+
+// The rear-end crash from runBounceChecks, with the two cars in different modules.
+static int runModuleBounce(const Track& track, int delay) {
+    const int idx = findClearStraight(track);
+    if (idx < 0) return 0;
+    const Sample& s = track.samples()[idx];
+    const float heading = std::atan2(s.tan.y, s.tan.x);
+    ModulePair m(track, 2, 2, 3, delay, 0.0f);
+    Input none[2], gas[2];
+    gas[0].gas = true;   // car 1 is the only person at module 1's keyboard
+    while (m.a.phase() == Phase::Countdown) m.step(none, none);
+    for (Race* r : {&m.a, &m.b}) {
+        stage(r->carForTest(0), track, idx, 0, heading, {});
+        stage(r->carForTest(1), track, idx - 12, 0, heading, s.tan * 200.0f);
+    }
+    float closing = 0, parted = 0, deepest = 0;
+    for (int t = 0; t < 60; ++t) {
+        const Car& target = m.own(0);
+        const Car& hitter = m.own(1);
+        float before = dot(hitter.vel - target.vel, s.tan);
+        m.step(none, gas);
+        deepest = std::max(deepest, carOverlapDepth(m.own(0), m.own(1)));
+        if (len(m.own(0).vel) > 30.0f && dot(m.own(0).vel - m.own(1).vel, s.tan) > 0) {
+            if (closing == 0) closing = before;
+            if (t > 0) parted = std::max(parted, dot(m.own(0).vel - m.own(1).vel, s.tan));
+        }
+        if (closing > 0 && parted > 0 && t > 20) break;
+    }
+    // Each module bounces only its own car, so allow a little less than the shared solver gives.
+    bool ok = closing > 100.0f && parted >= closing * 0.9f && deepest <= 4.0f;
+    printf("  modules rear-end, %d tick delay: met at %.0f px/s, parted at %.0f px/s, overlap %.2f px%s\n", delay, closing, parted,
+           deepest, ok ? "" : "  WRONG");
+    return ok ? 0 : 1;
+}
+
 int main() {
     int failures = 0;
     printf("STEERING\n");
@@ -337,6 +461,10 @@ int main() {
         failures += runIdleHeadToHead(track);
         failures += runIdleCircuit(def, track);
         failures += runPlayerBot(def, track);
+        failures += runModuleBounce(track, 0);
+        failures += runModuleBounce(track, 2);
+        failures += runModuleRace(def, track, 1, 0.0f);
+        failures += runModuleRace(def, track, 3, 0.1f);
     }
     printf(failures ? "FAILED: %d\n" : "OK (%d failures)\n", failures);
     return failures ? 1 : 0;

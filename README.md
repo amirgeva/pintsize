@@ -11,6 +11,7 @@ The game is built for the keyboard, including two players sharing one. All artwo
 - [Features](#features)
 - [Building](#building)
 - [How to play](#how-to-play)
+- [LAN play](#lan-play)
 - [Project layout](#project-layout)
 - [How it works](#how-it-works)
 - [Tuning and extending](#tuning-and-extending)
@@ -24,6 +25,7 @@ The game is built for the keyboard, including two players sharing one. All artwo
 - Momentum-based handling: cars rotate directly and slide before they grip
 - Table edges you can fall from, jumps across gaps, and spills that change your grip
 - Tournament, head-to-head (against the CPU or a second player) and time trial modes
+- LAN races for up to four machines, Windows and Linux mixed, with a headless computer driver (`psp_bot`) and a simulated poor connection for trying out lag and packet loss
 - Computer drivers that plan their own line around whatever is on the course
 - Synthesised engine, skid and impact sounds, plus a menu tune
 
@@ -34,8 +36,9 @@ The game is built for the keyboard, including two players sharing one. All artwo
 - CMake 3.16 or newer
 - A C++17 compiler
 - SDL2, which can come from vcpkg or a system package, or be downloaded automatically by CMake
+- ENet 1.3.18 for LAN play. CMake downloads and compiles it during the first configure, so that step needs an internet connection. It uses vcpkg's `enet` port instead if one is installed
 
-The game is developed and tested on Windows. It uses only SDL2 and the standard library, but the Linux and macOS steps below have not been tested yet.
+The game is developed and tested on Windows. The Linux build (game, bot and tests) has been built and tested on Ubuntu 24.04 under WSL, including LAN races against a Windows machine. macOS has not been tested.
 
 ### Windows with Visual Studio 2022 and vcpkg
 
@@ -67,13 +70,21 @@ Pass `-DPSP_FORCE_FETCH_SDL=ON` to use the downloaded copy even when SDL2 is ins
 
 ```sh
 # Debian or Ubuntu
-sudo apt install build-essential cmake libsdl2-dev
+sudo apt install build-essential cmake libsdl2-dev libenet-dev
 # macOS
 brew install cmake sdl2
 
 cmake -S . -B build
 cmake --build build -j
 ./build/pintsize
+```
+
+On a machine that only runs the headless bot, `-DPSP_BUILD_GAME=OFF` skips the game and with it the need for SDL2:
+
+```sh
+cmake -S . -B build -DPSP_BUILD_GAME=OFF
+cmake --build build -j
+./build/psp_bot --help
 ```
 
 ### Debian package
@@ -86,7 +97,7 @@ scripts/build-deb.sh                  # results go to build/deb/
 sudo apt install ./build/deb/pintsize_*_amd64.deb
 ```
 
-Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
+Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and ENet and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
 
 ### Version number
 
@@ -119,6 +130,8 @@ When you play alone, either set works, and X (accelerate), Z (brake) and Space o
 | Esc                 | Go back, or pause during a race           |
 | M                   | Mute                                      |
 | F11                 | Toggle fullscreen                         |
+| F9                  | LAN play: cycle the simulated connection  |
+| F10                 | LAN play: show network statistics         |
 
 Steering is linear: the angle you turn is proportional to how long you hold the key, and it works even when the car is standing still. A car keeps its momentum after you turn, so expect to slide, especially on low-grip vehicles and surfaces.
 
@@ -127,6 +140,8 @@ Steering is linear: the angle you turn is proportional to how long you hold the 
 **Tournament.** Race three computer cars through all six courses in order. Finish 1st or 2nd to advance. Any lower finish costs one of your three lives and you retry the course. Three wins in a row earn an extra life. The computer cars get better each round.
 
 **Head to head.** Two cars share one screen, which follows whoever is ahead. Each player starts with 4 of the 8 points. Leave your rival behind the edge of the screen and you take a point from them, then both cars restart together at the leader's position. Collect all 8 to win outright. Otherwise, whoever has more points when the leader completes the course's laps wins, and a tie goes to sudden death, where the next point decides it. Play against the CPU or against a second player on the same keyboard.
+
+**LAN race.** A circuit race against people or bots on other machines, with computer cars to fill the grid. See [LAN play](#lan-play).
 
 **Time trial.** Drive alone on any course. Your best lap for each course is saved in SDL's preference folder for `PintSize/Prix` (on Windows, `%APPDATA%\PintSize\Prix\best.dat`).
 
@@ -175,6 +190,160 @@ Other rules worth knowing:
 - A ramp launches you as you leave it, so the faster you hit it the further you fly. Too slow and you land in the gap.
 - A tank shell spins its target for 0.8 seconds, and the target is briefly protected from further hits.
 
+## LAN play
+
+Up to four machines can race each other on a local network, Windows and Linux mixed. Each player drives from their own machine and keyboard, and the host can fill the grid with computer cars. LAN races are circuit races over the course's usual number of laps. Head-to-head is not available over the network yet.
+
+### Before you start
+
+- **Same version everywhere.** Build every machine from the same commit. Machines with different versions refuse to race each other.
+- **One player per machine.** The game reads the keyboard only in the focused window, so two game windows on one PC cannot both be driven. For two people, use two machines.
+- **The game or the bot.** A machine with a player runs the game, `pintsize`, which needs SDL2 and a display. A machine that only supplies a computer opponent can run `psp_bot`, which needs neither. See [Building](#building), and `-DPSP_BUILD_GAME=OFF` for a bot-only build.
+- **Network.** Everyone must be on the same network. A wired connection gives the smoothest race.
+- **Firewall.** The host receives UDP on ports 47474 (the race) and 47475 (LAN search).
+  - Windows asks the first time you host; choose **Allow**.
+  - If your network is set to *Public*, allow public networks too, or switch the network to *Private*.
+  - On Linux with ufw, run `sudo ufw allow 47474:47475/udp`.
+- **The host's address.** You need it only if the search does not find the host.
+  - On Windows, run `ipconfig` and read *IPv4 Address* under the adapter on your network.
+  - On Linux, run `hostname -I`.
+
+### Two players on two machines
+
+1. **Host.** On one machine, choose **LAN RACE** from the main menu, then **HOST A RACE**. The lobby opens, showing the players who have joined.
+2. **Join.** On the other machine, choose **LAN RACE**, then **JOIN A RACE**. Pick the host from the list and press Enter. If the list stays empty, start the game with the host's address instead:
+
+   ```sh
+   ./build/pintsize --join 192.168.1.20                  # Linux
+   .\build\Release\pintsize.exe --join 192.168.1.20      # Windows
+   ```
+
+3. **Set up the race (host only).** In the lobby:
+   - Left and Right choose the course.
+   - Up and Down set how many computer cars join; use 0 for a one-on-one.
+   - Enter starts the race.
+4. **Race.** Everyone sees the countdown at the same moment. Steer with the usual keys; either set works, as when playing alone.
+5. **After the race.** Everyone gets the same result screen. Enter goes back to the lobby, where the host can pick another course and start again. Esc leaves.
+
+A player can join while a race is running. They wait in the lobby and take part in the next race.
+
+Your name in the lobby is your computer's name. Your car uses the driver you last picked in Tournament or Time Trial. If someone has already taken that driver, you get the next free one.
+
+### Playing against the bot
+
+`psp_bot` is a computer driver that takes part like another machine. It has no window and prints the lobby, its lap times, the results and network statistics to its terminal.
+
+- **Your game hosts.** Host from the game, then start the bot. It can run on the same PC or on any other machine on the network:
+
+  ```sh
+  psp_bot --join 127.0.0.1         # on the same PC
+  psp_bot --join 192.168.1.20      # from another machine, by the host's address
+  psp_bot --join                   # search the network and join the first host found
+  ```
+
+  The bot is `./build/psp_bot` on Linux and `.\build\Release\psp_bot.exe` on Windows. It waits in your lobby until you press Enter.
+
+- **The bot hosts.** Start the bot first, then join from the game:
+
+  ```sh
+  psp_bot --host --players 2 --cpu 2
+  ```
+
+  It starts a race 3 seconds after you join, and another about 7 seconds after each race ends, until you leave.
+
+| Bot option             | Meaning                                                                 |
+|------------------------|-------------------------------------------------------------------------|
+| `--join [ADDRESS[:PORT]]` | Join a host. With no address, search the network                    |
+| `--host`               | Host races                                                              |
+| `--players N`          | Host: start once N machines, the bot included, are in (default 2)       |
+| `--cpu N`              | Host: computer cars to add (default 0)                                  |
+| `--track N` or `cycle` | Host: course 0 to 5, or each course in turn (default 0)                 |
+| `--laps N`             | Host: laps per race (default: the course's own number)                  |
+| `--races N`            | Host: stop after N races                                                |
+| `--bind ADDRESS`       | Host: listen on one interface only, such as `127.0.0.1`                 |
+| `--skill X`            | Driving speed, 0.5 to 1.1 (default 1.0)                                 |
+| `--name NAME`, `--color 0..5` | Name in the lobby and preferred driver                           |
+| `--lag`, `--jitter`, `--loss` | Simulate a poor connection, as below                             |
+| `--stats SECONDS`, `--quiet` | How often to print network statistics (0 for never), or print only connections and results |
+
+### During a LAN race
+
+| Key                  | Action                                                                                  |
+|----------------------|-----------------------------------------------------------------------------------------|
+| Driving keys         | As usual; either set works                                                              |
+| Esc                  | Opens a menu: **BACK TO THE RACE** or **LEAVE THE RACE**. The race does not pause, and your car lets go of the controls while the menu is open |
+| F9                   | Cycle the simulated connection (see below)                                              |
+| F10                  | Show network statistics                                                                 |
+
+If a player leaves mid-race, the host's computer takes over their car and finishes the race with it. If the host leaves, the race ends for everyone with **THE HOST LEFT**.
+
+### Simulating a poor connection
+
+To feel how the game copes with a bad network, any machine can add delay and packet loss to its own traffic, in both directions. Setting it on one machine is enough.
+
+In the game, press **F9** to step through these presets, on any screen:
+
+| Preset | Delay each way | Jitter | Loss |
+|--------|----------------|--------|------|
+| 1      | none           | none   | none |
+| 2      | 20 ms          | ±5 ms  | 1%   |
+| 3      | 50 ms          | ±15 ms | 3%   |
+| 4      | 100 ms         | ±30 ms | 5%   |
+| 5      | 200 ms         | ±60 ms | 10%  |
+
+The active setting is shown in red in the lobby and during the race. You can also choose exact values on the command line, for the game or the bot:
+
+```sh
+pintsize --join 192.168.1.20 --lag 80 --jitter 30 --loss 5
+psp_bot --host --lag 100 --jitter 40 --loss 10
+```
+
+- **`--lag`** is the delay added each way, in milliseconds.
+- **`--jitter`** varies that delay at random by up to this much either side. Packets keep their order, as in a real network queue, so a delayed packet holds up the ones behind it and they arrive bunched together.
+- **`--loss`** is the chance, in percent, that each packet is lost. A lost car state simply vanishes. Other messages, such as bumps and results, arrive late instead, as after a resend.
+
+**F10** shows what the connection is doing:
+
+| Line           | Meaning                                                                                |
+|----------------|----------------------------------------------------------------------------------------|
+| ROUND TRIP     | Time for a message to reach the host and come back. On the host, the slowest client's  |
+| CLOCK WITHIN   | How far this machine's copy of the shared race clock can be off. Always 0 on the host  |
+| STATES / LOST  | Car states received and lost per second. Each other machine sends 60 a second          |
+| AGE            | How old car states are when they arrive                                                |
+
+### Game command-line options
+
+| Option                    | Meaning                                               |
+|---------------------------|-------------------------------------------------------|
+| `--host`                  | Open a hosted lobby straight away                     |
+| `--join ADDRESS[:PORT]`   | Join that host straight away. The port defaults to 47474 |
+| `--lag MS`, `--jitter MS`, `--loss PERCENT` | Start with a simulated poor connection |
+
+### Troubleshooting
+
+| Problem | What to do |
+|---------|------------|
+| **JOIN A RACE** finds nothing | Check the host's firewall and network profile, as above. Search does not cross routers, VPNs or virtual machine networks, and extra network adapters (VirtualBox, Hyper-V, WSL, ZeroTier) can carry the search away from your LAN. Join by address with `--join`. |
+| COULD NOT REACH THE HOST | Check the address, that the host is in its lobby, and that its firewall lets UDP 47474 in. |
+| DIFFERENT GAME VERSIONS, or THIS COURSE DIFFERS FROM THE HOST'S | Build every machine from the same commit. |
+| THE RACE IS FULL | A race takes four machines at most. |
+| TOOK TOO LONG TO START | A machine needed more than 15 seconds to prepare the course, and the race started without it. |
+| The other cars jump around | Press F10. A high LOST rate or AGE means a poor connection; try a cable instead of Wi-Fi. Check that F9 is not simulating lag. |
+| Racing against WSL on the same PC | WSL is behind its own network address translation, so search does not reach it. From Windows, join the address shown by `ip -4 addr show eth0` in WSL. From WSL, join the Windows address shown by `ip route` (after `via`). |
+
+### How LAN play works
+
+Every machine runs its own *race module*: a `Race` that drives the cars belonging to that machine and shows everyone else's from what they send. Single player is one module that drives every car.
+
+- **Sharing news.** After each step, a module sends its `RaceNews`. That is the states of its cars, about 90 bytes each, plus anything that must not be lost: bumps, shells fired and hit, sound events and the host's results. Car states go unreliably at 60 Hz and the rest reliably. Clients connect only to the host, which passes news between them.
+- **Showing other cars.** A car from another machine is moved on from its last state by its velocity and turn rate until the next state arrives. A lost packet costs only a little extrapolation.
+- **One clock.** Clients synchronise with the host's clock using pings, keeping the reply with the shortest round trip. Every machine makes step N at the same moment, the shared start time plus N ticks, so a state from step N can be moved on to any other step exactly.
+- **Collisions.** Cars in the same module are solved together, as in single player. For a car from another module, the module works out the contact on a scratch copy and moves only its own car. The other module does the same with its car. A bounce is also sent as a contact message, so neither side misses its half when the two see the bump a tick apart.
+- **Shells.** Each module decides whether a shell hits its own cars, whoever fired it, and announces hits so the shell disappears everywhere.
+- **Results.** The host referees. It places finishers by their own finishing times, ends the race and sends the result.
+
+`LocalLink` (`src/link.h`) connects modules inside one process with direct calls, optionally with delay and lost states. The tests use it to run whole races across a simulated network.
+
 ## Project layout
 
 ```
@@ -188,13 +357,17 @@ src/
   props.cpp        Per-pixel painters for every object
   tracks.cpp       Vehicle stats, environment settings and the six course layouts
   track.h/.cpp     Builds a course: route, ground, object placement, racing line
-  race.h/.cpp      Game rules and physics: cars, collisions, laps, computer drivers
+  race.h/.cpp      Game rules and physics: cars, collisions, laps, computer drivers, race modules
+  link.h/.cpp      LocalLink: joins race modules in one process, with optional delay and loss
+  net.h/.cpp       LAN play over ENet: sessions, lobby, clock sync, relaying, LAN search, simulated lag
+  bot.cpp          psp_bot, the headless computer driver for LAN races
   gfx.h/.cpp       Rendering: world chunks, car sprites, particles, bitmap font
   audio.h/.cpp     Software synthesiser for engines, effects and the menu tune
   game.h/.cpp      Menus, screen flow, HUD, keyboard input, saved best laps
   main.cpp         Window, fixed-timestep loop and the --shot debug tool
 tests/
   simtest.cpp      Headless test of every course and game mode
+  nettest.cpp      LAN sessions over real loopback sockets, in one process
 res/
   pintsize.rc      Windows resources: the program icon
   pintsize.ico     The icon, Dot's red coupe in every size Windows asks for
@@ -207,7 +380,7 @@ debian/            Debian packaging
 data/              Linux desktop entry, AppStream metainfo, icon and man page
 ```
 
-The code is split into two layers. `psp_core` (`track`, `tracks`, `props`, `race`) contains the rules and world generation and has no SDL dependency, which is what lets the test program run without a display. The `pintsize` executable adds rendering, sound and input on top.
+The code is split into layers. `psp_core` (`track`, `tracks`, `props`, `race`, `link`) contains the rules and world generation and has no SDL dependency, which is what lets the test program run without a display. `psp_net` adds LAN play on top of it, still without SDL, so `psp_bot` can run on a machine with no display. The `pintsize` executable adds rendering, sound and input.
 
 ## How it works
 
@@ -271,7 +444,7 @@ Add a line to `PROP_LIST` in `src/props.h`, within the section for its environme
 
 ## Testing
 
-The headless test needs no display or sound device:
+The headless tests need no display or sound device. `ctest` runs both: `simtest` takes a few seconds, and `nettest` races in real time for about 30 seconds.
 
 ```powershell
 cd build
@@ -287,7 +460,13 @@ Run `build\Release\psp_simtest.exe` directly to see the full report. For every c
 - head-to-head matches terminate and award points correctly
 - a player who never moves loses every point in head-to-head and finishes last in a race
 
-It also confirms that the angle turned is exactly proportional to how long the key is held.
+It also confirms that the angle turned is exactly proportional to how long the key is held. For LAN play, it splits races between two modules joined by a `LocalLink`. It runs them with one tick of delay, and with three ticks plus 10% of states lost, then checks that:
+
+- both modules agree on the result
+- each shows the other's cars within a few pixels of where they really are
+- cars do not sink into each other, and a rear-end crash between modules bounces as hard as one inside a module
+
+`psp_nettest` runs a host and two clients in one process over real sockets on 127.0.0.1, racing one lap in real time (about 30 seconds). One client simulates 50 ms ±25 of lag and 10% loss, then leaves partway, and the host must take over its car. The test checks that the race finishes, that host and the remaining client agree on the result, and how far each shows the others' cars from where they are.
 
 To look at the game without playing it, `--shot` renders one frame off-screen:
 
