@@ -1,3 +1,9 @@
+pintsize (0.2.0-1) UNRELEASED; urgency=medium
+
+  * Add LAN races for up to four machines, Windows and Linux mixed.
+
+ -- Amir Geva <amirgeva@gmail.com>  Fri, 27 Nov 2026 17:50:04 +0200
+
 pintsize (0.1.1-1) UNRELEASED; urgency=medium
 
   * Add a program icon for Windows.

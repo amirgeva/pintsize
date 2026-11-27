@@ -48,6 +48,11 @@
     <content_attribute id="violence-cartoon">mild</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.2.0" date="2026-11-27">
+      <description>
+        <p>Add LAN races for up to four machines, Windows and Linux mixed.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-13">
       <description>
         <p>Add a program icon for Windows.</p>
