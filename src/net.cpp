@@ -1072,7 +1072,9 @@ void NetSearch::poll() {
         to.port = NET_DISCOVERY_PORT;
         to.host = ENET_HOST_BROADCAST;
         enet_socket_send(m.sock, &to, &b, 1);
-        enet_address_set_host_ip(&to, "127.0.0.1");   // a host on this machine, which broadcasts may not reach
+        // A host on this machine, which broadcasts may not reach: 127.0.0.1. (Set directly because
+        // enet_address_set_host_ip is missing from ENet before 1.3.14, which Ubuntu 22.04 ships.)
+        to.host = ENET_HOST_TO_NET_32(0x7F000001u);
         to.port = NET_DISCOVERY_PORT;
         enet_socket_send(m.sock, &to, &b, 1);
     }

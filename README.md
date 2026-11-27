@@ -70,7 +70,7 @@ Pass `-DPSP_FORCE_FETCH_SDL=ON` to use the downloaded copy even when SDL2 is ins
 
 ```sh
 # Debian or Ubuntu
-sudo apt install build-essential cmake libsdl2-dev
+sudo apt install build-essential cmake libsdl2-dev libenet-dev
 # macOS
 brew install cmake sdl2
 
@@ -97,7 +97,7 @@ scripts/build-deb.sh                  # results go to build/deb/
 sudo apt install ./build/deb/pintsize_*_amd64.deb
 ```
 
-Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
+Run `scripts/build-deb.sh --help` for options such as `--binary-only` and `--sign`. The package links against the system SDL2 and ENet and never downloads anything. Its library version requirements come from the system it is built on, so build it on the oldest Debian or Ubuntu release you want to support, or in a clean chroot with `sbuild` or `pbuilder`.
 
 ### Version number
 

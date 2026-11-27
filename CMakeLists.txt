@@ -55,16 +55,28 @@ if(PSP_BUILD_GAME)
   endif()
 endif()
 
-# ENet (reliable UDP) carries LAN play. Use vcpkg's copy if there is one; otherwise download the
-# source and compile it here. Its own build script is skipped (SOURCE_SUBDIR points nowhere)
-# because it asks for a CMake version that CMake 4 no longer accepts.
+# ENet (reliable UDP) carries LAN play. Use vcpkg's copy or the system's (libenet-dev, found
+# through pkg-config) if there is one; otherwise download the source and compile it here. Its own
+# build script is skipped (SOURCE_SUBDIR points nowhere) because it asks for a CMake version that
+# CMake 4 no longer accepts.
 find_package(unofficial-enet CONFIG QUIET)
+if(NOT TARGET unofficial::enet::enet)
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(ENET_PC QUIET IMPORTED_TARGET libenet)
+  endif()
+endif()
 if(TARGET unofficial::enet::enet)
   add_library(psp_enet INTERFACE)
   target_link_libraries(psp_enet INTERFACE unofficial::enet::enet)
   if(WIN32)
     target_link_libraries(psp_enet INTERFACE ws2_32 winmm)
   endif()
+elseif(TARGET PkgConfig::ENET_PC)
+  add_library(psp_enet INTERFACE)
+  target_link_libraries(psp_enet INTERFACE PkgConfig::ENET_PC)
+elseif(FETCHCONTENT_FULLY_DISCONNECTED)
+  message(FATAL_ERROR "ENet development files not found and downloads are off (install libenet-dev)")
 else()
   FetchContent_Declare(enet
     URL https://github.com/lsalzman/enet/archive/refs/tags/v1.3.18.tar.gz
